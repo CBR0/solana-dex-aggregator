@@ -1,0 +1,72 @@
+[package]
+name = "solana-thunder"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/raydium-amm-v4",
+    "crates/raydium-clmm",
+    "crates/meteora-damm",
+    "crates/meteora-dlmm",
+    "crates/pumpfun-amm",
+    "crates/aggregator",
+    "crates/engine",
+    "crates/executor",
+]
+
+[[bin]]
+name = "thunder-engine"
+path = "bin/engine.rs"
+
+[dependencies]
+thunder-core = { path = "crates/core" }
+raydium-amm-v4 = { path = "crates/raydium-amm-v4" }
+raydium-clmm = { path = "crates/raydium-clmm" }
+meteora-damm = { path = "crates/meteora-damm" }
+meteora-dlmm = { path = "crates/meteora-dlmm" }
+pumpfun-amm = { path = "crates/pumpfun-amm" }
+thunder-engine = { path = "crates/engine" }
+thunder-aggregator = { path = "crates/aggregator" }
+solana-rpc-client = "3.0"
+solana-commitment-config = "3.0"
+solana-pubkey = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time"] }
+futures = "0.3.31"
+dotenvy = "0.15"
+
+# Integration tests
+solana-sdk = { workspace = true }
+solana-rpc-client = "3.0"
+solana-commitment-config = "3.0"
+bincode = "1.3"
+solana-rpc-client-api = "3.0"
+serde = { workspace = true }
+borsh = { workspace = true }
+
+# Geyser streaming
+yellowstone-grpc-client = "11.0"
+yellowstone-grpc-proto = { version = "11.0", features = ["plugin"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+solana-pubkey = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1.0"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+
+solana-sdk = "3.0"
+solana-pubkey = "3.0"
+solana-system-interface = { version = "3.0", features = ["bincode"] }
+
+spl-associated-token-account = "8.0"
+spl-token = { version = "9.0", features = ["no-entrypoint"] }
+
+borsh = "1.6"
