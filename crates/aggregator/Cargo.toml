@@ -1,0 +1,61 @@
+[package]
+name = "thunder-aggregator"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "thunder-agg"
+path = "src/main.rs"
+
+[[bin]]
+name = "sample-cache"
+path = "src/bin/sample_cache.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "simulate"
+path = "src/bin/simulate.rs"
+
+[[bin]]
+name = "land"
+path = "src/bin/land.rs"
+
+[dependencies]
+# Workspace DEX crates
+thunder-core = { path = "../core" }
+raydium-amm-v4 = { path = "../raydium-amm-v4" }
+raydium-clmm = { path = "../raydium-clmm" }
+meteora-damm = { path = "../meteora-damm" }
+meteora-dlmm = { path = "../meteora-dlmm" }
+pumpfun-amm = { path = "../pumpfun-amm" }
+thunder-executor = { path = "../executor" }
+
+# Workspace deps
+solana-sdk = { workspace = true }
+solana-pubkey = { workspace = true }
+serde = { workspace = true }
+borsh = { workspace = true }
+
+# Async + RPC
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+solana-rpc-client = "3.0"
+solana-rpc-client-api = "3.0"
+solana-account-decoder-client-types = "3.0"
+solana-commitment-config = "3.0"
+
+# CLI
+indicatif = "0.17"
+rustyline = "15"
+
+# Serialization / stats
+sysinfo = "0.34"
+bincode = "1.3"
+serde_json = "1.0"
+
+[[bin]]
+name = "multihop"
+path = "src/bin/multihop.rs"
