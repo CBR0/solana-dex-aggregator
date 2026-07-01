@@ -1,0 +1,13 @@
+[package]
+name = "meteora-damm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thunder-core = { path = "../core" }
+solana-pubkey = { workspace = true }
+solana-system-interface = { workspace = true }
+spl-associated-token-account = { workspace = true }
+spl-token = { workspace = true }
+serde = { workspace = true }
+borsh = { workspace = true }
