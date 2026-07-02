@@ -1,0 +1,23 @@
+[package]
+name = "thunder-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thunder-core = { path = "../core" }
+thunder-aggregator = { path = "../aggregator" }
+solana-pubkey = { workspace = true }
+solana-rpc-client = "3.0"
+solana-rpc-client-api = "3.0"
+solana-account-decoder-client-types = "3.0"
+solana-commitment-config = "3.0"
+serde = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+dashmap = "6"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+yellowstone-grpc-client = "11.0"
+yellowstone-grpc-proto = { version = "11.0", features = ["plugin"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+futures = "0.3"
+bincode = "1.3"
