@@ -1,0 +1,23 @@
+[package]
+name = "thunder-executor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thunder-core = { path = "../core" }
+raydium-amm-v4 = { path = "../raydium-amm-v4" }
+
+borsh = { workspace = true }
+bincode = "1.3"
+
+solana-sdk = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-system-interface = { workspace = true }
+
+spl-associated-token-account = { workspace = true }
+spl-token = { workspace = true }
+
+solana-rpc-client = "3.0"
+solana-rpc-client-api = "3.0"
+solana-commitment-config = "3.0"
+solana-address-lookup-table-interface = { version = "3.0", features = ["bincode"] }
