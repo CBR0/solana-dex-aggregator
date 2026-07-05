@@ -1,7 +1,7 @@
 //! Route → execution bridge.
 //!
 //! Turns an aggregator [`Route`] into on-chain swap instructions using
-//! `thunder-executor`, pulling per-DEX accounts out of the cached pool state
+//! `solroute-executor`, pulling per-DEX accounts out of the cached pool state
 //! the index already holds. Single-hop routes only for now — multi-hop atomic
 //! execution (intermediate ATAs + chained slippage) is a follow-up.
 
@@ -14,13 +14,13 @@ use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::signature::{Signature, Signer};
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 
-use thunder_core::{GenericError, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
-use thunder_executor::alt;
-use thunder_executor::meteora_damm_v2::{self, DammV2Accounts};
-use thunder_executor::pumpswap::{self, PumpSwapAccounts};
-use thunder_executor::raydium_amm_v4;
-use thunder_executor::submit;
-use thunder_executor::{SwapLeg, SwapOptions};
+use solroute_core::{GenericError, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
+use solroute_executor::alt;
+use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
+use solroute_executor::pumpswap::{self, PumpSwapAccounts};
+use solroute_executor::raydium_amm_v4;
+use solroute_executor::submit;
+use solroute_executor::{SwapLeg, SwapOptions};
 
 use crate::cache::CachedPool;
 use crate::pool_index::PoolIndex;

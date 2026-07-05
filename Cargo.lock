@@ -1679,9 +1679,9 @@ dependencies = [
  "serde",
  "solana-pubkey 3.0.0",
  "solana-system-interface 3.1.0",
+ "solroute-core",
  "spl-associated-token-account",
  "spl-token",
- "thunder-core",
 ]
 
 [[package]]
@@ -1693,9 +1693,9 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-sdk",
  "solana-system-interface 3.1.0",
+ "solroute-core",
  "spl-associated-token-account",
  "spl-token",
- "thunder-core",
 ]
 
 [[package]]
@@ -2223,9 +2223,9 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-sdk",
  "solana-system-interface 3.1.0",
+ "solroute-core",
  "spl-associated-token-account",
  "spl-token",
- "thunder-core",
 ]
 
 [[package]]
@@ -2385,9 +2385,9 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-sdk",
  "solana-system-interface 3.1.0",
+ "solroute-core",
  "spl-associated-token-account",
  "spl-token",
- "thunder-core",
 ]
 
 [[package]]
@@ -2397,7 +2397,7 @@ dependencies = [
  "borsh",
  "serde",
  "solana-pubkey 3.0.0",
- "thunder-core",
+ "solroute-core",
 ]
 
 [[package]]
@@ -4091,36 +4091,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "solana-thunder"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "borsh",
- "dotenvy",
- "futures",
- "meteora-damm",
- "meteora-dlmm",
- "pumpfun-amm",
- "raydium-amm-v4",
- "raydium-clmm",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "solana-commitment-config",
- "solana-pubkey 3.0.0",
- "solana-rpc-client",
- "solana-rpc-client-api",
- "solana-sdk",
- "thunder-aggregator",
- "thunder-core",
- "thunder-engine",
- "tokio",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
-]
-
-[[package]]
 name = "solana-time-utils"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4329,6 +4299,114 @@ dependencies = [
  "thiserror 2.0.18",
  "wasm-bindgen",
  "zeroize",
+]
+
+[[package]]
+name = "solroute"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "borsh",
+ "dotenvy",
+ "futures",
+ "meteora-damm",
+ "meteora-dlmm",
+ "pumpfun-amm",
+ "raydium-amm-v4",
+ "raydium-clmm",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "solana-commitment-config",
+ "solana-pubkey 3.0.0",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
+ "solana-sdk",
+ "solroute-aggregator",
+ "solroute-core",
+ "solroute-engine",
+ "tokio",
+ "yellowstone-grpc-client",
+ "yellowstone-grpc-proto",
+]
+
+[[package]]
+name = "solroute-aggregator"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "borsh",
+ "futures",
+ "indicatif 0.17.11",
+ "meteora-damm",
+ "meteora-dlmm",
+ "pumpfun-amm",
+ "raydium-amm-v4",
+ "raydium-clmm",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "solana-account-decoder-client-types",
+ "solana-commitment-config",
+ "solana-pubkey 3.0.0",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
+ "solana-sdk",
+ "solroute-core",
+ "solroute-executor",
+ "sysinfo",
+ "tokio",
+]
+
+[[package]]
+name = "solroute-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "solana-pubkey 3.0.0",
+]
+
+[[package]]
+name = "solroute-engine"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bincode",
+ "dashmap",
+ "futures",
+ "rustls",
+ "serde",
+ "solana-account-decoder-client-types",
+ "solana-commitment-config",
+ "solana-pubkey 3.0.0",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
+ "solroute-aggregator",
+ "solroute-core",
+ "tokio",
+ "tower-http",
+ "yellowstone-grpc-client",
+ "yellowstone-grpc-proto",
+]
+
+[[package]]
+name = "solroute-executor"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "borsh",
+ "raydium-amm-v4",
+ "solana-address-lookup-table-interface",
+ "solana-commitment-config",
+ "solana-pubkey 3.0.0",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
+ "solana-sdk",
+ "solana-system-interface 3.1.0",
+ "solroute-core",
+ "spl-associated-token-account",
+ "spl-token",
 ]
 
 [[package]]
@@ -4749,84 +4827,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "thunder-aggregator"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "borsh",
- "futures",
- "indicatif 0.17.11",
- "meteora-damm",
- "meteora-dlmm",
- "pumpfun-amm",
- "raydium-amm-v4",
- "raydium-clmm",
- "rustyline",
- "serde",
- "serde_json",
- "solana-account-decoder-client-types",
- "solana-commitment-config",
- "solana-pubkey 3.0.0",
- "solana-rpc-client",
- "solana-rpc-client-api",
- "solana-sdk",
- "sysinfo",
- "thunder-core",
- "thunder-executor",
- "tokio",
-]
-
-[[package]]
-name = "thunder-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "solana-pubkey 3.0.0",
-]
-
-[[package]]
-name = "thunder-engine"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bincode",
- "dashmap",
- "futures",
- "rustls",
- "serde",
- "solana-account-decoder-client-types",
- "solana-commitment-config",
- "solana-pubkey 3.0.0",
- "solana-rpc-client",
- "solana-rpc-client-api",
- "thunder-aggregator",
- "thunder-core",
- "tokio",
- "tower-http",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
-]
-
-[[package]]
-name = "thunder-executor"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "borsh",
- "raydium-amm-v4",
- "solana-address-lookup-table-interface",
- "solana-commitment-config",
- "solana-pubkey 3.0.0",
- "solana-rpc-client",
- "solana-rpc-client-api",
- "solana-sdk",
- "solana-system-interface 3.1.0",
- "spl-associated-token-account",
- "spl-token",
- "thunder-core",
 ]
 
 [[package]]

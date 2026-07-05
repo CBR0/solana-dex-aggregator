@@ -7,15 +7,15 @@ use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use tokio::sync::RwLock;
 
-use thunder_aggregator::cache;
-use thunder_aggregator::loader::PoolLoader;
-use thunder_aggregator::price;
+use solroute_aggregator::cache;
+use solroute_aggregator::loader::PoolLoader;
+use solroute_aggregator::price;
 
-use thunder_engine::account_store::AccountStore;
-use thunder_engine::api::{self, AppState};
-use thunder_engine::cold_start;
-use thunder_engine::pool_registry::PoolRegistry;
-use thunder_engine::streaming;
+use solroute_engine::account_store::AccountStore;
+use solroute_engine::api::{self, AppState};
+use solroute_engine::cold_start;
+use solroute_engine::pool_registry::PoolRegistry;
+use solroute_engine::streaming;
 
 #[tokio::main]
 async fn main() {
@@ -28,7 +28,7 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080);
 
-    println!("Thunder Engine");
+    println!("solroute engine");
     println!("==============");
 
     // 1. Load pools from cache or RPC.
@@ -178,12 +178,12 @@ async fn main() {
         .await
         .expect("failed to bind TCP listener");
     println!("Serving on http://0.0.0.0:{port}");
-    thunder_engine::axum::serve(listener, app).await.expect("HTTP server error");
+    solroute_engine::axum::serve(listener, app).await.expect("HTTP server error");
 }
 
-async fn load_from_rpc(rpc_url: &str) -> thunder_aggregator::pool_index::PoolIndex {
+async fn load_from_rpc(rpc_url: &str) -> solroute_aggregator::pool_index::PoolIndex {
     let loader = PoolLoader::new(rpc_url);
-    let cb: thunder_aggregator::loader::ProgressCallback = Box::new(|progress| {
+    let cb: solroute_aggregator::loader::ProgressCallback = Box::new(|progress| {
         println!("[loader] {}: {:?}", progress.dex_name, progress.phase);
     });
     loader

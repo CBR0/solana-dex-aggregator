@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-Solana Thunder is a Rust DEX aggregator for Solana. 6 pure DEX crates parse on-chain account data and compute swap outputs through a unified `Market` trait. An aggregator crate loads all pools from RPC, finds multi-hop routes, and provides pricing/caching. An engine crate runs a persistent HTTP API with live gRPC streaming. No external APIs -- all data is on-chain.
+solroute is a Rust DEX aggregator for Solana. 6 pure DEX crates parse on-chain account data and compute swap outputs through a unified `Market` trait. An aggregator crate loads all pools from RPC, finds multi-hop routes, and provides pricing/caching. An engine crate runs a persistent HTTP API with live gRPC streaming. No external APIs -- all data is on-chain.
 
 ## Architecture
 
 ```
-thunder-core          Market trait, shared types, constants
+solroute-core          Market trait, shared types, constants
     ^
     |
     +-- raydium-amm-v4    Constant product AMM
@@ -16,9 +16,9 @@ thunder-core          Market trait, shared types, constants
     +-- meteora-dlmm      Dynamic liquidity bins
     +-- pumpfun-amm       Bonding curve (virtual reserves)
 
-thunder-aggregator    Pool loading, routing, pricing, caching, CLI
-thunder-engine        HTTP API, AccountStore, PoolRegistry, cold_start, streaming
-solana-thunder        Root crate: re-exports all DEX crates
+solroute-aggregator    Pool loading, routing, pricing, caching, CLI
+solroute-engine        HTTP API, AccountStore, PoolRegistry, cold_start, streaming
+solroute        Root crate: re-exports all DEX crates
 ```
 
 No DEX crate imports another DEX crate.
@@ -42,7 +42,7 @@ Raw account bytes --BorshDeserialize--> Pool model struct
 ## Key Directories
 
 ```
-solana-thunder/
+solroute/
 +-- bin/
 |   +-- engine.rs                       # Engine binary: immediate serve, background cold start
 +-- Cargo.toml                          # Workspace root
@@ -68,7 +68,7 @@ solana-thunder/
 |   |   +-- price.rs                    # SOL/USD on-chain via CLMM sqrt_price
 |   |   +-- pool_index.rs              # In-memory token-pair graph
 |   |   +-- cli.rs                      # Progress bars + interactive REPL
-|   |   +-- main.rs                     # CLI binary (thunder-agg)
+|   |   +-- main.rs                     # CLI binary (solroute-cli)
 |   +-- engine/src/                     # Persistent service (library only, binary in bin/)
 |   |   +-- account_store.rs            # DashMap store, implements AccountDataProvider
 |   |   +-- pool_registry.rs            # Swappable validation, vault-to-pool reverse index
@@ -89,14 +89,14 @@ solana-thunder/
 cargo check                        # Type-check all workspace crates
 cargo build                        # Build all workspace crates
 cargo test --workspace --lib       # Run unit tests
-cargo build --release --bin thunder-engine  # Build engine binary
-cargo build --release -p thunder-aggregator  # Build aggregator CLI
+cargo build --release --bin solroute-engine  # Build engine binary
+cargo build --release -p solroute-aggregator  # Build aggregator CLI
 
 # Run engine (persistent service with HTTP API)
-RPC_URL="https://..." cargo run --release --bin thunder-engine
+RPC_URL="https://..." cargo run --release --bin solroute-engine
 
 # Run aggregator CLI (interactive REPL)
-RPC_URL="https://..." cargo run --release -p thunder-aggregator
+RPC_URL="https://..." cargo run --release -p solroute-aggregator
 
 # Engine API
 curl http://localhost:8080/health
@@ -113,7 +113,7 @@ curl "http://localhost:8080/price?mint=SOL"
 | `CACHE_MAX_AGE` | `3600` | Max cache age (seconds) before RPC reload |
 | `GEYSER_ENDPOINT` | (none) | Yellowstone gRPC endpoint for live streaming |
 | `GEYSER_TOKEN` | (none) | Yellowstone gRPC auth token |
-| `PORT` | `8080` | Thunder Engine HTTP API port |
+| `PORT` | `8080` | solroute engine HTTP API port |
 | `PRIVATE_KEY` | (none) | Base58 keypair in `.env` (never committed) |
 
 ### Engine Startup
@@ -162,11 +162,11 @@ Route discovery gates on pool status and liquidity:
 ### REPL Commands
 
 ```
-thunder> price SOL                    # SOL price in USD
-thunder> price <mint>                 # Token price in SOL + USD
-thunder> route SOL <mint> 1.0         # Find best routes
-thunder> stats                        # Pool counts, memory, uptime
-thunder> exit
+solroute> price SOL                    # SOL price in USD
+solroute> price <mint>                 # Token price in SOL + USD
+solroute> route SOL <mint> 1.0         # Find best routes
+solroute> stats                        # Pool counts, memory, uptime
+solroute> exit
 ```
 
 ## Code Conventions
@@ -211,9 +211,9 @@ Each DEX has its own on-chain status semantics. `is_active()` overrides check th
 
 ### Constants
 - DEX-specific program IDs in each DEX crate
-- Shared constants (WSOL, USDC, USDT, TOKEN_PROGRAM, etc.) in `thunder_core`
-- Quote currency ordering: `thunder_core::quote_priority()`
-- Token decimal inference: `thunder_core::infer_mint_decimals()`
+- Shared constants (WSOL, USDC, USDT, TOKEN_PROGRAM, etc.) in `solroute_core`
+- Quote currency ordering: `solroute_core::quote_priority()`
+- Token decimal inference: `solroute_core::infer_mint_decimals()`
 
 ### Pool Discovery Filters
 

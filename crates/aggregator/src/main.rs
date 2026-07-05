@@ -4,11 +4,11 @@ use std::time::Instant;
 
 use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
-use thunder_aggregator::{cache, cli, loader, price, stats};
+use solroute_aggregator::{cache, cli, loader, price, stats};
 
 #[tokio::main]
 async fn main() {
-    println!("Solana Thunder Aggregator");
+    println!("solroute Aggregator");
     println!("========================\n");
 
     let rpc_url =
@@ -89,7 +89,7 @@ async fn main() {
     cli::run_repl(&index, &mut stats_collector, sol_usd_price).await;
 }
 
-async fn load_from_rpc(rpc_url: &str) -> thunder_aggregator::pool_index::PoolIndex {
+async fn load_from_rpc(rpc_url: &str) -> solroute_aggregator::pool_index::PoolIndex {
     let t0 = Instant::now();
     let display = cli::LoadingDisplay::new();
     let progress_cb = display.progress_callback();

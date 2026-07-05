@@ -6,7 +6,7 @@
 //! standard `pools.cache` the engine/CLI/bench can load with zero further RPC.
 //!
 //! Usage:
-//!   RPC_URL=... cargo run --release -p thunder-aggregator --bin sample-cache -- <addrs.json> [out.cache]
+//!   RPC_URL=... cargo run --release -p solroute-aggregator --bin sample-cache -- <addrs.json> [out.cache]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,10 +14,10 @@ use std::str::FromStr;
 
 use solana_pubkey::Pubkey;
 
-use thunder_aggregator::cache;
-use thunder_aggregator::loader::{PoolLoader, ProgressCallback};
-use thunder_aggregator::pool_index::PoolIndex;
-use thunder_aggregator::types::LoadProgress;
+use solroute_aggregator::cache;
+use solroute_aggregator::loader::{PoolLoader, ProgressCallback};
+use solroute_aggregator::pool_index::PoolIndex;
+use solroute_aggregator::types::LoadProgress;
 
 #[tokio::main]
 async fn main() {

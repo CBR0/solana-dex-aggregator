@@ -3,7 +3,7 @@
 //! searched from the loaded cache. Simulates as a v0 tx and reports size with
 //! and without an ALT. No SOL spent.
 //!
-//! Usage: RPC_URL=... cargo run --release -p thunder-aggregator --bin multihop -- [pools.cache] [payer]
+//! Usage: RPC_URL=... cargo run --release -p solroute-aggregator --bin multihop -- [pools.cache] [payer]
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -12,12 +12,12 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{Keypair, Signer};
 
-use thunder_aggregator::cache;
-use thunder_aggregator::execute;
-use thunder_aggregator::pool_index::PoolIndex;
-use thunder_aggregator::types::{Route, RouteHop};
-use thunder_core::{SwapDirection, USDC, WSOL};
-use thunder_executor::{alt, submit};
+use solroute_aggregator::cache;
+use solroute_aggregator::execute;
+use solroute_aggregator::pool_index::PoolIndex;
+use solroute_aggregator::types::{Route, RouteHop};
+use solroute_core::{SwapDirection, USDC, WSOL};
+use solroute_executor::{alt, submit};
 
 /// Find a pool of `dex` connecting mints `a` and `b`; return (address, quoted_out for a->b).
 fn find_pool(index: &PoolIndex, dex: &str, a: Pubkey, b: Pubkey, amount_in: u64) -> Option<(String, u64)> {

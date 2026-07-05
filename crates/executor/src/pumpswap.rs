@@ -6,7 +6,7 @@
 //! trailing buyback fee-recipient accounts, so every live pool is executable.
 //!
 //! Adaptations vs the source SDK:
-//! - `min_amount_out` bounds come from the caller (Thunder's quote × slippage),
+//! - `min_amount_out` bounds come from the caller (solroute's quote × slippage),
 //!   so the pump-specific fee math + global/fee-config RPC caches are not needed.
 //! - Fee recipients are chosen deterministically (first known-valid), not
 //!   randomly — correctness is identical; only load-spreading is skipped.
@@ -14,7 +14,7 @@
 use solana_pubkey::Pubkey;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
-use thunder_core::{GenericError, TOKEN_PROGRAM, USDC, WSOL};
+use solroute_core::{GenericError, TOKEN_PROGRAM, USDC, WSOL};
 
 use crate::ata::{ata, close_account_ix, create_ata_idempotent, wrap_sol_ixs, wsol};
 use crate::types::{SwapLeg, SwapOptions};

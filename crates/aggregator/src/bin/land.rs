@@ -5,7 +5,7 @@
 //!
 //! Usage:
 //!   RPC_URL=... SIGNER_KEY=<base58 secret> \
-//!     cargo run --release -p thunder-aggregator --bin land -- [pools.cache] [amount_lamports] [slippage_bps]
+//!     cargo run --release -p solroute-aggregator --bin land -- [pools.cache] [amount_lamports] [slippage_bps]
 
 use std::path::PathBuf;
 
@@ -13,11 +13,11 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{Keypair, Signer};
 
-use thunder_aggregator::cache;
-use thunder_aggregator::execute;
-use thunder_aggregator::types::{Route, RouteHop};
-use thunder_core::{SwapDirection, WSOL};
-use thunder_executor::{alt, submit};
+use solroute_aggregator::cache;
+use solroute_aggregator::execute;
+use solroute_aggregator::types::{Route, RouteHop};
+use solroute_core::{SwapDirection, WSOL};
+use solroute_executor::{alt, submit};
 
 #[tokio::main]
 async fn main() {

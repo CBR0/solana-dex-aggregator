@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use solana_pubkey::Pubkey;
-use thunder_core::GenericError;
+use solroute_core::GenericError;
 
 use crate::types::PoolEntry;
 

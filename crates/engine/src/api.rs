@@ -11,10 +11,10 @@ use solana_pubkey::Pubkey;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
-use thunder_aggregator::pool_index::PoolIndex;
-use thunder_aggregator::price;
-use thunder_aggregator::router::Router;
-use thunder_core::WSOL;
+use solroute_aggregator::pool_index::PoolIndex;
+use solroute_aggregator::price;
+use solroute_aggregator::router::Router;
+use solroute_core::WSOL;
 
 use crate::account_store::AccountStore;
 use crate::pool_registry::PoolRegistry;

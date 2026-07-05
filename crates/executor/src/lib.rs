@@ -1,4 +1,4 @@
-//! # Thunder Executor
+//! # solroute Executor
 //!
 //! Swap-instruction builders for executing routes produced by the aggregator.
 //! Each supported DEX exposes a small `*Accounts` struct (populated from the
@@ -6,7 +6,7 @@
 //! that emits the on-chain swap instruction plus optional ATA setup/teardown.
 //!
 //! Instruction layouts are ported from the FnZero `sol-trade-sdk` (MIT) and
-//! adapted to feed from Thunder's own pool structs. No SWQoS/nonce/gas
+//! adapted to feed from solroute's own pool structs. No SWQoS/nonce/gas
 //! infrastructure — just correct instruction construction.
 
 pub mod alt;

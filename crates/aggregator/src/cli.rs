@@ -14,7 +14,7 @@ use crate::price::get_token_price;
 use crate::router::Router;
 use crate::stats::StatsCollector;
 use crate::types::{LoadPhase, LoadProgress};
-use thunder_core::{infer_mint_decimals, WSOL};
+use solroute_core::{infer_mint_decimals, WSOL};
 
 // ---------------------------------------------------------------------------
 // Loading progress display
@@ -95,12 +95,12 @@ impl LoadingDisplay {
 // ---------------------------------------------------------------------------
 
 pub async fn run_repl(index: &PoolIndex, stats: &mut StatsCollector, sol_usd_price: Option<f64>) {
-    println!("\nThunder Aggregator ready. Type 'help' for commands.\n");
+    println!("\nsolroute ready. Type 'help' for commands.\n");
 
     let mut rl = DefaultEditor::new().expect("Failed to create editor");
 
     loop {
-        let readline = rl.readline("thunder> ");
+        let readline = rl.readline("solroute> ");
         match readline {
             Ok(line) => {
                 let line = line.trim();

@@ -1,4 +1,4 @@
-# Solana Thunder
+# solroute
 
 A Rust DEX **routing + execution** engine for Solana. Loads pools across 6 DEX
 protocols, finds optimal multi-hop swap routes with live on-chain pricing, and
@@ -49,7 +49,7 @@ bin-array / dynamic-vault swap building is unimplemented).
 Persistent service that keeps all pool data in memory and serves quotes.
 
 ```bash
-RPC_URL="https://your-rpc-endpoint.com" cargo run --release --bin thunder-engine
+RPC_URL="https://your-rpc-endpoint.com" cargo run --release --bin solroute-engine
 
 # In another terminal:
 curl "http://localhost:8080/health"
@@ -60,33 +60,33 @@ curl "http://localhost:8080/quote?inputMint=SOL&outputMint=<mint>&amount=1000000
 ### Aggregator CLI
 
 ```bash
-cargo build --release -p thunder-aggregator
-RPC_URL="https://your-rpc-endpoint.com" ./target/release/thunder-agg
+cargo build --release -p solroute-aggregator
+RPC_URL="https://your-rpc-endpoint.com" ./target/release/solroute-cli
 ```
 
 ### Testing tools (no engine required)
 
 ```bash
 # Build a bounded sample cache from a handful of pools (needs RPC once)
-RPC_URL=... cargo run --release -p thunder-aggregator --bin sample-cache -- <addrs.json> pools.cache
+RPC_URL=... cargo run --release -p solroute-aggregator --bin sample-cache -- <addrs.json> pools.cache
 
 # Time find_routes over the cache — pure in-memory, zero RPC
-cargo run --release -p thunder-aggregator --bin bench -- pools.cache 2000
+cargo run --release -p solroute-aggregator --bin bench -- pools.cache 2000
 
 # Simulate route execution against live state — no SOL, no signature
-RPC_URL=... cargo run --release -p thunder-aggregator --bin simulate -- pools.cache [payer_pubkey]
+RPC_URL=... cargo run --release -p solroute-aggregator --bin simulate -- pools.cache [payer_pubkey]
 
 # Land a real single-hop swap via v0 + ALT (spends SOL — burner wallet only)
-RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p thunder-aggregator --bin land -- pools.cache
+RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p solroute-aggregator --bin land -- pools.cache
 
 # Build + land a real multi-hop, multi-protocol route via v0 + ALT
-RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p thunder-aggregator --bin multihop -- pools.cache
+RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p solroute-aggregator --bin multihop -- pools.cache
 ```
 
 ## Architecture
 
 ```
-thunder-core              Market trait, shared types, constants, AccountDataProvider
+solroute-core              Market trait, shared types, constants, AccountDataProvider
     ^
     +-- raydium-amm-v4    Constant product AMM
     +-- raydium-clmm      Concentrated liquidity
@@ -94,12 +94,12 @@ thunder-core              Market trait, shared types, constants, AccountDataProv
     +-- meteora-dlmm      Dynamic liquidity bins
     +-- pumpfun-amm       Bonding curve / AMM
 
-thunder-aggregator        Pool loading, routing, pricing, caching, CLI,
+solroute-aggregator        Pool loading, routing, pricing, caching, CLI,
                           route->executor bridge (execute.rs)
-thunder-executor          Swap instruction builders, ATA/wrap helpers, ALT,
+solroute-executor          Swap instruction builders, ATA/wrap helpers, ALT,
                           v0 tx assembly + simulate + submit
-thunder-engine            Persistent service: AccountStore + gRPC streaming + HTTP API
-solana-thunder            Root crate: re-exports all DEX crates; thunder-engine bin
+solroute-engine            Persistent service: AccountStore + gRPC streaming + HTTP API
+solroute            Root crate: re-exports all DEX crates; solroute-engine bin
 ```
 
 ### Routing flow
@@ -146,7 +146,7 @@ execute::execute_route
 ### Project Structure
 
 ```
-solana-thunder/
+solroute/
 ├── bin/engine.rs                     Engine binary entry point
 ├── crates/
 │   ├── core/                         Market trait, AccountDataProvider, constants
@@ -201,7 +201,7 @@ solana-thunder/
 The DEX crates are pure — no RPC, no async, no I/O:
 
 ```rust
-use thunder_core::{Market, SwapDirection};
+use solroute_core::{Market, SwapDirection};
 
 let pool: raydium_amm_v4::RaydiumAMMV4 = borsh::from_slice(&account_data)?;
 let market = raydium_amm_v4::RaydiumAmmV4Market::new(pool, address, quote_bal, base_bal);
@@ -213,7 +213,7 @@ let output = market.calculate_output(1_000_000_000, SwapDirection::Buy)?;
 Building a swap instruction from parsed pool state:
 
 ```rust
-use thunder_executor::{meteora_damm_v2::{self, DammV2Accounts}, SwapLeg, SwapOptions};
+use solroute_executor::{meteora_damm_v2::{self, DammV2Accounts}, SwapLeg, SwapOptions};
 
 let ixs = meteora_damm_v2::build_swap(&accounts, &leg, None, &SwapOptions::default())?;
 ```
@@ -225,8 +225,8 @@ cargo check                    # Type-check workspace
 cargo build --workspace        # Build all crates + bins
 cargo test --workspace --lib   # Unit tests (router + executor)
 
-cargo build --release -p thunder-aggregator     # Aggregator CLI + tools
-cargo build --release --bin thunder-engine       # Engine
+cargo build --release -p solroute-aggregator     # Aggregator CLI + tools
+cargo build --release --bin solroute-engine       # Engine
 ```
 
 ## Notes & limitations
@@ -238,7 +238,7 @@ cargo build --release --bin thunder-engine       # Engine
 - **No SWQoS/Jito fan-out** — swaps submit via plain RPC (preflight-protected).
   Callers wanting MEV lanes can serialize the signed tx and forward it.
 - Execution builders are ported from FnZero `sol-trade-sdk` (MIT), adapted to
-  feed from Thunder's own pool structs.
+  feed from solroute's own pool structs.
 
 ## References
 

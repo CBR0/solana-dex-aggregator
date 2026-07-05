@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use solana_pubkey::Pubkey;
-use thunder_core::{AccountDataProvider, GenericError, SwapDirection, USDC, USDT, WSOL};
+use solroute_core::{AccountDataProvider, GenericError, SwapDirection, USDC, USDT, WSOL};
 
 use crate::pool_index::PoolIndex;
 use crate::types::{Quote, Route, RouteHop};
@@ -653,7 +653,7 @@ fn best_pool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thunder_core::{Market, PoolFees, PoolFinancials, PoolMetadata, constant_product_swap, USDC};
+    use solroute_core::{Market, PoolFees, PoolFinancials, PoolMetadata, constant_product_swap, USDC};
 
     use crate::pool_index::PoolIndex;
     use crate::types::PoolEntry;

@@ -16,7 +16,7 @@ use solana_sdk::message::{v0, AddressLookupTableAccount, Message, VersionedMessa
 use solana_sdk::signature::{Signature, Signer};
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 
-use thunder_core::GenericError;
+use solroute_core::GenericError;
 
 /// Compute Budget program.
 const COMPUTE_BUDGET_PROGRAM: Pubkey =

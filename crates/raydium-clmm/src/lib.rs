@@ -8,7 +8,7 @@ pub mod tick_arrays;
 use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
-use thunder_core::{
+use solroute_core::{
     GenericError, Market, PoolFees, PoolFinancials, PoolMetadata, SwapDirection,
     quote_priority,
 };

@@ -1,11 +1,11 @@
 [package]
-name = "thunder-engine"
+name = "solroute-engine"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-thunder-core = { path = "../core" }
-thunder-aggregator = { path = "../aggregator" }
+solroute-core = { path = "../core" }
+solroute-aggregator = { path = "../aggregator" }
 solana-pubkey = { workspace = true }
 solana-rpc-client = "3.0"
 solana-rpc-client-api = "3.0"

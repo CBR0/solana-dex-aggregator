@@ -1,13 +1,13 @@
 //! Meteora Dynamic Liquidity Market Maker (DLMM) DEX crate.
 //!
-//! Implements the `Market` trait from `thunder-core`
+//! Implements the `Market` trait from `solroute-core`
 //! for Meteora DLMM bin-based concentrated liquidity pools.
 
 
 use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
-use thunder_core::{
+use solroute_core::{
     quote_priority, GenericError, Market,
     PoolFees, PoolFinancials, PoolMetadata,
     SwapDirection, infer_mint_decimals,

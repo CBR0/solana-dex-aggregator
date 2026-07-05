@@ -18,7 +18,7 @@ use futures::StreamExt;
 use solana_pubkey::Pubkey;
 use yellowstone_grpc_proto::prelude::*;
 
-use thunder_core::Market;
+use solroute_core::Market;
 
 // ---------------------------------------------------------------------------
 // DEX config (CLMM, DAMM V2, DLMM only — these have price from pool data)

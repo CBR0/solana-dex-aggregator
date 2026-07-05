@@ -12,7 +12,7 @@ use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
 use raydium_amm_v4::RaydiumAMMV4;
-use thunder_core::{GenericError, TOKEN_PROGRAM};
+use solroute_core::{GenericError, TOKEN_PROGRAM};
 
 use crate::ata::{ata, close_account_ix, create_ata_idempotent, wrap_sol_ixs, wsol};
 use crate::types::{SwapLeg, SwapOptions};

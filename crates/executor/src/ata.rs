@@ -4,7 +4,7 @@ use solana_pubkey::Pubkey;
 use solana_sdk::instruction::Instruction;
 use solana_system_interface::instruction as system_instruction;
 
-use thunder_core::{TOKEN_PROGRAM, WSOL};
+use solroute_core::{TOKEN_PROGRAM, WSOL};
 
 /// WSOL mint.
 pub fn wsol() -> Pubkey {

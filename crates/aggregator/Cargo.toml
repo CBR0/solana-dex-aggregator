@@ -1,10 +1,10 @@
 [package]
-name = "thunder-aggregator"
+name = "solroute-aggregator"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "thunder-agg"
+name = "solroute-cli"
 path = "src/main.rs"
 
 [[bin]]
@@ -25,13 +25,13 @@ path = "src/bin/land.rs"
 
 [dependencies]
 # Workspace DEX crates
-thunder-core = { path = "../core" }
+solroute-core = { path = "../core" }
 raydium-amm-v4 = { path = "../raydium-amm-v4" }
 raydium-clmm = { path = "../raydium-clmm" }
 meteora-damm = { path = "../meteora-damm" }
 meteora-dlmm = { path = "../meteora-dlmm" }
 pumpfun-amm = { path = "../pumpfun-amm" }
-thunder-executor = { path = "../executor" }
+solroute-executor = { path = "../executor" }
 
 # Workspace deps
 solana-sdk = { workspace = true }

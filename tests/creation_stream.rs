@@ -19,8 +19,8 @@ use yellowstone_grpc_proto::prelude::*;
 use helpers::{bs58_encode, build_account_keys, trunc};
 
 // Program IDs — canonical constants from each crate.
-const TOKEN_PROGRAM: &str = thunder_core::TOKEN_PROGRAM;
-const TOKEN_2022_PROGRAM: &str = thunder_core::TOKEN_PROGRAM_2022;
+const TOKEN_PROGRAM: &str = solroute_core::TOKEN_PROGRAM;
+const TOKEN_2022_PROGRAM: &str = solroute_core::TOKEN_PROGRAM_2022;
 
 const RAYDIUM_V4: &str = raydium_amm_v4::RAYDIUM_LIQUIDITY_POOL_V4;
 const RAYDIUM_CLMM: &str = raydium_clmm::RAYDIUM_CLMM;

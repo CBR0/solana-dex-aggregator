@@ -4,7 +4,7 @@
 //! and without an Address Lookup Table, against the 1232-byte network cap.
 //!
 //! Usage:
-//!   RPC_URL=... cargo run --release -p thunder-aggregator --bin simulate -- [pools.cache] [payer_pubkey]
+//!   RPC_URL=... cargo run --release -p solroute-aggregator --bin simulate -- [pools.cache] [payer_pubkey]
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -12,12 +12,12 @@ use std::str::FromStr;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 
-use thunder_aggregator::cache;
-use thunder_aggregator::execute;
-use thunder_aggregator::pool_index::PoolIndex;
-use thunder_aggregator::types::RouteHop;
-use thunder_core::{SwapDirection, WSOL};
-use thunder_executor::{alt, submit, SwapOptions};
+use solroute_aggregator::cache;
+use solroute_aggregator::execute;
+use solroute_aggregator::pool_index::PoolIndex;
+use solroute_aggregator::types::RouteHop;
+use solroute_core::{SwapDirection, WSOL};
+use solroute_executor::{alt, submit, SwapOptions};
 
 const EXECUTABLE: [&str; 3] = ["Meteora DAMM V2", "Pumpfun AMM", "Raydium AMM V4"];
 const TX_LIMIT: usize = 1232;

@@ -21,7 +21,7 @@ use solana_sdk::instruction::Instruction;
 use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::signature::Signer;
 
-use thunder_core::GenericError;
+use solroute_core::GenericError;
 
 use crate::submit;
 

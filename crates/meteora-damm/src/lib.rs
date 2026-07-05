@@ -7,7 +7,7 @@ pub use models::{
 };
 pub use utils::derive_token_vault_address;
 
-use thunder_core::{
+use solroute_core::{
     GenericError, Market, PoolFinancials, PoolFees, PoolMetadata,
     SwapDirection, calculate_price_impact_bps, constant_product_swap, infer_mint_decimals, quote_priority,
 };

@@ -2,7 +2,7 @@
 use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
-use thunder_core::{
+use solroute_core::{
     GenericError, Market, SwapDirection, PoolMetadata, PoolFinancials, PoolFees,
     constant_product_swap, calculate_price_impact_bps,
     quote_priority,

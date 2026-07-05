@@ -6,7 +6,7 @@
 use solana_pubkey::Pubkey;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
-use thunder_core::GenericError;
+use solroute_core::GenericError;
 
 use crate::ata::{ata, close_account_ix, create_ata_idempotent, wrap_sol_ixs, wsol};
 use crate::types::{SwapLeg, SwapOptions};

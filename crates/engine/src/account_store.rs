@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use solana_pubkey::Pubkey;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use thunder_core::AccountDataProvider;
+use solroute_core::AccountDataProvider;
 
 pub struct AccountData {
     pub data: Vec<u8>,

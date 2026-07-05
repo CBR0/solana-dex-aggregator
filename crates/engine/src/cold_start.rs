@@ -113,7 +113,7 @@ pub async fn fetch_tick_arrays(
             Some(d) if !d.is_empty() => d,
             _ => continue,
         };
-        if let Some((_pool_id, pdas)) = thunder_aggregator::cache::extract_clmm_tick_pdas(cached_data) {
+        if let Some((_pool_id, pdas)) = solroute_aggregator::cache::extract_clmm_tick_pdas(cached_data) {
             pool_tick_map.insert(addr.clone(), pdas.clone());
             all_pdas.extend(pdas);
         }
@@ -202,7 +202,7 @@ pub async fn fetch_dlmm_bin_arrays(
         if info.bitmap_ext.is_some() {
             continue;
         }
-        if let Some((_pool_pk, pda)) = thunder_aggregator::cache::extract_dlmm_bin_pda(&info.cached_data) {
+        if let Some((_pool_pk, pda)) = solroute_aggregator::cache::extract_dlmm_bin_pda(&info.cached_data) {
             pda_map.insert(addr.to_string(), pda);
             all_pdas.push(pda);
         }

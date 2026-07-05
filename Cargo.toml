@@ -1,5 +1,5 @@
 [package]
-name = "solana-thunder"
+name = "solroute"
 version = "0.1.0"
 edition = "2024"
 
@@ -18,18 +18,18 @@ members = [
 ]
 
 [[bin]]
-name = "thunder-engine"
+name = "solroute-engine"
 path = "bin/engine.rs"
 
 [dependencies]
-thunder-core = { path = "crates/core" }
+solroute-core = { path = "crates/core" }
 raydium-amm-v4 = { path = "crates/raydium-amm-v4" }
 raydium-clmm = { path = "crates/raydium-clmm" }
 meteora-damm = { path = "crates/meteora-damm" }
 meteora-dlmm = { path = "crates/meteora-dlmm" }
 pumpfun-amm = { path = "crates/pumpfun-amm" }
-thunder-engine = { path = "crates/engine" }
-thunder-aggregator = { path = "crates/aggregator" }
+solroute-engine = { path = "crates/engine" }
+solroute-aggregator = { path = "crates/aggregator" }
 solana-rpc-client = "3.0"
 solana-commitment-config = "3.0"
 solana-pubkey = { workspace = true }

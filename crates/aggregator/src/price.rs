@@ -5,7 +5,7 @@
 
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
-use thunder_core::{GenericError, USDC, WSOL};
+use solroute_core::{GenericError, USDC, WSOL};
 
 use crate::pool_index::PoolIndex;
 use crate::types::TokenPrice;

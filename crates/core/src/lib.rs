@@ -1,6 +1,6 @@
-//! # Thunder Core
+//! # solroute core
 //!
-//! Core traits and types for the Solana Thunder DEX aggregator.
+//! Core traits and types for the solroute DEX aggregator.
 //!
 //! This crate defines the unified `Market` trait and shared types used by all
 //! DEX implementations. Each DEX crate depends only on this core crate,

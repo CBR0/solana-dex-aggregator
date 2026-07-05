@@ -26,7 +26,7 @@ use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
 use pumpfun_amm::{PumpfunAmmPool, PUMPFUN_AMM_PROGRAM};
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
 use raydium_clmm::{RaydiumCLMMPool, RAYDIUM_CLMM};
-use thunder_core::GenericError;
+use solroute_core::GenericError;
 
 use crate::cache::CachedPool;
 use crate::pool_index::PoolIndex;

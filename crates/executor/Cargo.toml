@@ -1,10 +1,10 @@
 [package]
-name = "thunder-executor"
+name = "solroute-executor"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-thunder-core = { path = "../core" }
+solroute-core = { path = "../core" }
 raydium-amm-v4 = { path = "../raydium-amm-v4" }
 
 borsh = { workspace = true }

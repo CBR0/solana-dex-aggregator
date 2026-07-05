@@ -3,16 +3,16 @@
 //! source→target pairs. Zero RPC — pure in-memory routing.
 //!
 //! Usage:
-//!   cargo run --release -p thunder-aggregator --bin bench -- [pools.cache] [queries]
+//!   cargo run --release -p solroute-aggregator --bin bench -- [pools.cache] [queries]
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use solana_pubkey::Pubkey;
 
-use thunder_aggregator::cache;
-use thunder_aggregator::router::Router;
-use thunder_core::WSOL;
+use solroute_aggregator::cache;
+use solroute_aggregator::router::Router;
+use solroute_core::WSOL;
 
 fn main() {
     let mut args = std::env::args().skip(1);
