@@ -1,120 +1,187 @@
 # Solana Thunder
 
-A Rust DEX aggregator for Solana. Loads all pools across 6 DEX protocols, finds optimal multi-hop swap routes, and provides real-time pricing -- all without external APIs.
+A Rust DEX **routing + execution** engine for Solana. Loads pools across 6 DEX
+protocols, finds optimal multi-hop swap routes with live on-chain pricing, and
+builds/simulates/lands the resulting swaps as versioned transactions — all
+without external routing or price APIs.
 
 ## Features
 
-- **2M+ pools loaded** across 6 DEXs (Raydium V4, Raydium CLMM, Meteora DAMM V1/V2, Meteora DLMM, Pumpfun AMM)
-- **Multi-hop routing** (1-4 hops, default 2) with hub-based and bidirectional neighbor search
-- **On-chain SOL/USD pricing** from Raydium CLMM `sqrt_price_x64` -- no external APIs
-- **Real-time streaming** via Yellowstone gRPC (Geyser) for live pool state updates
-- **Instant startup** from binary pool cache (~6s vs ~4min from RPC)
-- **Pure DEX crates** -- no I/O, no async, just math. Each crate implements the `Market` trait independently
+- **Routing (6 DEXs)** — Raydium AMM V4, Raydium CLMM, Meteora DAMM V1/V2,
+  Meteora DLMM, Pumpfun AMM. 2M+ pools loadable.
+- **Multi-hop routing** (1–4 hops) with hub-based + bidirectional neighbor
+  search, a **canonical-edge cache** (deepest-liquidity pool per pair for
+  intermediate hops), and a **reverse-reachability prune** for 3/4-hop search.
+- **Data-driven hubs** — top-K mints by pool degree, unioned with settlement
+  seeds (WSOL/USDC/USDT).
+- **Execution (3 DEXs)** — Raydium AMM V4, Meteora DAMM V2, Pumpfun AMM
+  (PumpSwap). Builds swap instructions from parsed pool state, resolves the real
+  token program (SPL Token / Token-2022), signs, and submits.
+- **v0 transactions + Address Lookup Tables** — multi-hop routes that exceed the
+  1232-byte legacy limit are compressed via an ALT (on-the-fly creation or a
+  pre-warmed table) and landed as v0 transactions.
+- **Transaction simulation** — validate any route against live state with zero
+  SOL and no signature (`sigVerify=false` + `replaceRecentBlockhash=true`).
+- **On-chain SOL/USD pricing** from Raydium CLMM `sqrt_price_x64` — no oracles.
+- **Real-time streaming** via Yellowstone gRPC (Geyser) for live pool updates.
+- **Instant startup** from a binary pool cache (~6s vs ~4min from RPC).
+- **Pure DEX crates** — no I/O, no async, just math. Each implements the
+  `Market` trait independently.
+
+## Coverage: routing vs execution
+
+| DEX | Routing | Execution |
+|---|:---:|:---:|
+| Raydium AMM V4 | ✅ | ✅ |
+| Meteora DAMM V2 | ✅ | ✅ |
+| Pumpfun AMM (PumpSwap) | ✅ | ✅ |
+| Raydium CLMM | ✅ | ❌ |
+| Meteora DAMM V1 | ✅ | ❌ |
+| Meteora DLMM | ✅ | ❌ |
+
+CLMM / DLMM / DAMM V1 are routable/quotable but not yet executable (tick-array /
+bin-array / dynamic-vault swap building is unimplemented).
 
 ## Quick Start
 
 ### Run the Engine (HTTP API)
 
-The engine is a persistent service that keeps all pool data in memory and serves an HTTP API.
+Persistent service that keeps all pool data in memory and serves quotes.
 
 ```bash
-# Start the engine (loads pools, fetches accounts, starts API on port 8080)
 RPC_URL="https://your-rpc-endpoint.com" cargo run --release --bin thunder-engine
 
 # In another terminal:
 curl "http://localhost:8080/health"
 curl "http://localhost:8080/price?mint=SOL"
-curl "http://localhost:8080/quote?inputMint=SOL&outputMint=6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN&amount=100000000&maxHops=2"
+curl "http://localhost:8080/quote?inputMint=SOL&outputMint=<mint>&amount=100000000&maxHops=2"
 ```
 
-### Run the Aggregator CLI
+### Aggregator CLI
 
 ```bash
 cargo build --release -p thunder-aggregator
-
-# First run loads all pools from RPC and saves cache
 RPC_URL="https://your-rpc-endpoint.com" ./target/release/thunder-agg
+```
 
-# Subsequent runs load from cache (~6s)
-RPC_URL="https://your-rpc-endpoint.com" ./target/release/thunder-agg
+### Testing tools (no engine required)
+
+```bash
+# Build a bounded sample cache from a handful of pools (needs RPC once)
+RPC_URL=... cargo run --release -p thunder-aggregator --bin sample-cache -- <addrs.json> pools.cache
+
+# Time find_routes over the cache — pure in-memory, zero RPC
+cargo run --release -p thunder-aggregator --bin bench -- pools.cache 2000
+
+# Simulate route execution against live state — no SOL, no signature
+RPC_URL=... cargo run --release -p thunder-aggregator --bin simulate -- pools.cache [payer_pubkey]
+
+# Land a real single-hop swap via v0 + ALT (spends SOL — burner wallet only)
+RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p thunder-aggregator --bin land -- pools.cache
+
+# Build + land a real multi-hop, multi-protocol route via v0 + ALT
+RPC_URL=... SIGNER_KEY=<base58 secret> cargo run --release -p thunder-aggregator --bin multihop -- pools.cache
 ```
 
 ## Architecture
 
 ```
-thunder-core              Market trait, shared types, constants
+thunder-core              Market trait, shared types, constants, AccountDataProvider
     ^
-    |
     +-- raydium-amm-v4    Constant product AMM
     +-- raydium-clmm      Concentrated liquidity
     +-- meteora-damm      Dynamic AMM V1 + V2
     +-- meteora-dlmm      Dynamic liquidity bins
-    +-- pumpfun-amm       Bonding curve
+    +-- pumpfun-amm       Bonding curve / AMM
 
-thunder-aggregator        Pool loading, routing, pricing, caching, CLI
+thunder-aggregator        Pool loading, routing, pricing, caching, CLI,
+                          route->executor bridge (execute.rs)
+thunder-executor          Swap instruction builders, ATA/wrap helpers, ALT,
+                          v0 tx assembly + simulate + submit
 thunder-engine            Persistent service: AccountStore + gRPC streaming + HTTP API
-solana-thunder            Root crate: re-exports all DEX crates
+solana-thunder            Root crate: re-exports all DEX crates; thunder-engine bin
 ```
 
-### Engine Service Flow
+### Routing flow
 
 ```
-Yellowstone gRPC  --->  AccountStore (DashMap, implements AccountDataProvider)
-                              |
-                              +--- PoolRegistry (swappable validation, vault-to-pool index)
-                              |
-                              v
-                    HTTP API:  GET /quote  (?maxHops=2&slippageBps=50)
-                               GET /price
-                               GET /health
+GET /quote -> Router.find_routes
+   1-hop direct + 2-hop (hubs + neighbor fwd/rev)
+   + 3-hop (hub-hub, neighbor-hub, reverse-reachability pruned)
+   + 4-hop (neighbor -> hub -> neighbor)
+   intermediate legs use the canonical-edge cache; the FINAL leg full-scans
+   every pool on the pair (deepest liquidity != best price for a given size)
+   -> routes ranked by output amount
 ```
 
-### Engine Startup
+### Execution flow
 
 ```
-1. Load cache              ~6s   pools.cache -> PoolIndex
+Route -> execute::build_hop_instructions        (per hop)
+   look up pool in PoolIndex, decode CachedPool, dispatch on dex_name
+   resolve real token program (SPL Token / Token-2022) per mint
+   -> executor::{raydium_amm_v4,meteora_damm_v2,pumpswap}::build_swap
+      (+ ATA create / WSOL wrap / close as needed)
+
+execute::execute_route
+   compute-budget ixs + per-hop slippage floor
+   -> fits under 1232 bytes?  v0 tx, no ALT
+      else pre-warmed ALT supplied?  use it
+      else create + extend an ALT on-chain (finalized slot, wait a slot)
+   -> sign v0 tx -> send (preflight-protected)
+```
+
+### Engine startup
+
+```
+1. Load cache              ~6s      pools.cache -> PoolIndex
 2. validate_from_cache     instant  cached vault balances -> swappable set
-3. Start HTTP server       instant  /quote works immediately
-4. gRPC streaming          background  live account updates + vault re-validation
-5. Vault fetch             background  4M+ accounts, 100 concurrent batches
-6. SOL/USD price refresh   background  every 15s
+3. warm canonical + hubs   ~ms      router structures ready
+4. Start HTTP server       instant  /quote works immediately
+5. gRPC streaming          bg       live account updates + vault re-validation
+6. Vault fetch             bg       4M+ accounts, 100 concurrent batches
+7. SOL/USD price refresh   bg       every 15s
 ```
 
 ### Project Structure
 
 ```
 solana-thunder/
-+-- bin/
-|   +-- engine.rs                     Engine binary entry point
-+-- crates/
-|   +-- core/                         Market trait, AccountDataProvider, constants
-|   +-- raydium-amm-v4/               RaydiumAMMV4 + RaydiumAmmV4Market
-|   +-- raydium-clmm/                 RaydiumCLMMPool + RaydiumClmmMarket + tick arrays
-|   +-- meteora-damm/                 MeteoraDAMMMarket + V2Market + models
-|   +-- meteora-dlmm/                 MeteoraDLMMPool + MeteoraDlmmMarket
-|   +-- pumpfun-amm/                  PumpfunAmmPool + PumpfunAmmMarket
-|   +-- aggregator/                   Pool loading, routing, pricing, caching, CLI
-|   |   +-- src/
-|   |       +-- loader.rs             RPC pool loading (all DEXs)
-|   |       +-- cache.rs              Disk cache + PDA extraction
-|   |       +-- router.rs             Multi-hop routing (live data, pre-resolved mints)
-|   |       +-- price.rs              On-chain pricing (CLMM sqrt_price)
-|   |       +-- pool_index.rs         In-memory token-pair graph
-|   |       +-- cli.rs                Progress bars + REPL
-|   +-- engine/                       Persistent service (library)
-|       +-- src/
-|           +-- account_store.rs      DashMap store, implements AccountDataProvider
-|           +-- pool_registry.rs      Swappable validation, vault-to-pool reverse index
-|           +-- cold_start.rs         Background vault fetch, tick arrays, bin arrays
-|           +-- streaming.rs          Yellowstone gRPC: live updates + vault re-validation
-|           +-- api.rs                Axum HTTP: /quote, /price, /health
-+-- tests/
-    +-- trade_stream.rs               Live DEX swap streaming (gRPC)
-    +-- creation_stream.rs            Token + pool creation streaming
-    +-- pool_financials.rs            Pool financial analysis
-    +-- validate_prices.rs            Price validation tests
-    +-- helpers/
-        +-- mod.rs                    Shared Geyser test utilities
+├── bin/engine.rs                     Engine binary entry point
+├── crates/
+│   ├── core/                         Market trait, AccountDataProvider, constants
+│   ├── raydium-amm-v4/               RaydiumAMMV4 + market
+│   ├── raydium-clmm/                 CLMM pool + market + tick arrays
+│   ├── meteora-damm/                 DAMM V1 + V2 markets + models
+│   ├── meteora-dlmm/                 DLMM pool + market
+│   ├── pumpfun-amm/                  Pumpfun AMM pool + market
+│   ├── aggregator/                   Loading, routing, pricing, caching, CLI, execute bridge
+│   │   └── src/
+│   │       ├── loader.rs             RPC pool loading (+ bounded sample fetch)
+│   │       ├── cache.rs              Disk cache + PDA extraction
+│   │       ├── router.rs             Multi-hop routing (canonical cache, hubs, prune)
+│   │       ├── pool_index.rs         Token-pair graph + canonical-edge + hub ranking
+│   │       ├── price.rs              On-chain pricing (CLMM sqrt_price)
+│   │       ├── execute.rs            Route -> executor bridge (build / simulate / land)
+│   │       ├── cli.rs                Progress bars + REPL
+│   │       └── bin/                  sample_cache, bench, simulate, land, multihop
+│   ├── engine/                       Persistent service (library)
+│   │   └── src/
+│   │       ├── account_store.rs      DashMap store, implements AccountDataProvider
+│   │       ├── pool_registry.rs      Swappable validation, vault->pool index
+│   │       ├── cold_start.rs         Background vault/tick/bin-array fetch
+│   │       ├── streaming.rs          Yellowstone gRPC live updates
+│   │       └── api.rs                Axum HTTP: /quote, /price, /health
+│   └── executor/                     Swap execution
+│       └── src/
+│           ├── meteora_damm_v2.rs    swap2 builder (14-account layout)
+│           ├── pumpswap.rs           Pump AMM buy/sell (full account fidelity)
+│           ├── raydium_amm_v4.rs     swap_base_in (fetches Serum market from RPC)
+│           ├── ata.rs                ATA create / WSOL wrap / close
+│           ├── alt.rs                Address Lookup Table create/extend/fetch
+│           ├── submit.rs             Compute budget, v0 tx, sign, simulate, send
+│           └── types.rs             SwapLeg, SwapOptions
+└── tests/                            Live gRPC/RPC integration tests
 ```
 
 ## Configuration
@@ -124,14 +191,14 @@ solana-thunder/
 | `RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
 | `CACHE_PATH` | `pools.cache` | Pool cache file location |
 | `CACHE_MAX_AGE` | `3600` | Max cache age (seconds) before RPC reload |
-| `PRIVATE_KEY` | (none) | Base58 keypair (in `.env`, never committed) |
 | `GEYSER_ENDPOINT` | (none) | Yellowstone gRPC endpoint for live streaming |
 | `GEYSER_TOKEN` | (none) | Yellowstone gRPC auth token |
-| `PORT` | `8080` | Thunder Engine HTTP API port |
+| `PORT` | `8080` | Engine HTTP API port |
+| `SIGNER_KEY` | (none) | Base58 secret key for the `land` / `multihop` bins |
 
-## Using as a Library
+## Using the DEX crates as a library
 
-The DEX crates are pure -- no RPC, no async, no I/O:
+The DEX crates are pure — no RPC, no async, no I/O:
 
 ```rust
 use thunder_core::{Market, SwapDirection};
@@ -143,16 +210,35 @@ let price = market.current_price()?;
 let output = market.calculate_output(1_000_000_000, SwapDirection::Buy)?;
 ```
 
+Building a swap instruction from parsed pool state:
+
+```rust
+use thunder_executor::{meteora_damm_v2::{self, DammV2Accounts}, SwapLeg, SwapOptions};
+
+let ixs = meteora_damm_v2::build_swap(&accounts, &leg, None, &SwapOptions::default())?;
+```
+
 ## Development
 
 ```bash
 cargo check                    # Type-check workspace
-cargo build                    # Build all workspace crates
-cargo test --workspace --lib   # Unit tests
+cargo build --workspace        # Build all crates + bins
+cargo test --workspace --lib   # Unit tests (router + executor)
 
-cargo build --release -p thunder-aggregator    # Build aggregator CLI
-cargo build --release --bin thunder-engine      # Build engine
+cargo build --release -p thunder-aggregator     # Aggregator CLI + tools
+cargo build --release --bin thunder-engine       # Engine
 ```
+
+## Notes & limitations
+
+- **Multi-hop amount chaining** uses the router's quoted per-hop amounts with a
+  safety haircut on intermediate inputs (a hop can only spend what the previous
+  hop actually produced on-chain); a production version would quote the whole
+  route atomically.
+- **No SWQoS/Jito fan-out** — swaps submit via plain RPC (preflight-protected).
+  Callers wanting MEV lanes can serialize the signed tx and forward it.
+- Execution builders are ported from FnZero `sol-trade-sdk` (MIT), adapted to
+  feed from Thunder's own pool structs.
 
 ## References
 
