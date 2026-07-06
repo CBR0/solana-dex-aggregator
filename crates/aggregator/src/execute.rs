@@ -16,6 +16,7 @@ use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 
 use solroute_core::{GenericError, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
 use solroute_executor::alt;
+use solroute_executor::meteora_damm_v1::{self, DammV1Accounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
 use solroute_executor::raydium_amm_v4;
@@ -114,9 +115,21 @@ pub async fn build_hop_instructions(
         CachedPool::RaydiumV4 { pool, .. } => {
             raydium_amm_v4::build_swap(rpc, &pool, pool_pubkey, &leg, opts).await
         }
-        CachedPool::RaydiumClmm { .. }
-        | CachedPool::MeteoraDAMMV1 { .. }
-        | CachedPool::MeteoraDLMM { .. } => Err(format!(
+        CachedPool::MeteoraDAMMV1 { pool, .. } => {
+            let accounts = DammV1Accounts {
+                pool: pool_pubkey,
+                token_a_mint: pool.token_a_mint,
+                token_b_mint: pool.token_b_mint,
+                a_vault: pool.a_vault,
+                b_vault: pool.b_vault,
+                a_vault_lp: pool.a_vault_lp,
+                b_vault_lp: pool.b_vault_lp,
+                protocol_token_a_fee: pool.protocol_token_a_fee,
+                protocol_token_b_fee: pool.protocol_token_b_fee,
+            };
+            meteora_damm_v1::build_swap(&accounts, &leg, opts)
+        }
+        CachedPool::RaydiumClmm { .. } | CachedPool::MeteoraDLMM { .. } => Err(format!(
             "execution not implemented for {} ({})",
             hop.dex_name, hop.pool_address
         )
