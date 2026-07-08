@@ -11,6 +11,7 @@
 
 pub mod alt;
 pub mod ata;
+pub mod meteora_dlmm;
 pub mod meteora_damm_v1;
 pub mod meteora_damm_v2;
 pub mod pumpswap;
