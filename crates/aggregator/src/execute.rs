@@ -21,6 +21,7 @@ use solroute_executor::meteora_dlmm::{self, DlmmAccounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
 use solroute_executor::raydium_amm_v4;
+use solroute_executor::raydium_clmm;
 use solroute_executor::submit;
 use solroute_executor::{SwapLeg, SwapOptions};
 
@@ -145,11 +146,16 @@ pub async fn build_hop_instructions(
             };
             meteora_dlmm::build_swap(&accounts, &leg, opts)
         }
-        CachedPool::RaydiumClmm { .. } => Err(format!(
-            "execution not implemented for {} ({})",
-            hop.dex_name, hop.pool_address
-        )
-        .into()),
+        CachedPool::RaydiumClmm { pool, .. } => {
+            let progs = resolve_token_programs(rpc, &[pool.token_mint_0, pool.token_mint_1]).await;
+            let (in_prog, out_prog) = if leg.input_mint == pool.token_mint_0 {
+                (progs[0], progs[1])
+            } else {
+                (progs[1], progs[0])
+            };
+            // None extension data: covers near-price swaps (±512 tick arrays).
+            raydium_clmm::build_swap(&pool, pool_pubkey, in_prog, out_prog, &leg, None, opts)
+        }
     }
 }
 

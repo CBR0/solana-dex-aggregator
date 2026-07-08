@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 solroute-core = { path = "../core" }
 raydium-amm-v4 = { path = "../raydium-amm-v4" }
+raydium-clmm = { path = "../raydium-clmm" }
 
 borsh = { workspace = true }
 bincode = "1.3"

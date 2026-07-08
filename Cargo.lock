@@ -4397,6 +4397,7 @@ dependencies = [
  "bincode",
  "borsh",
  "raydium-amm-v4",
+ "raydium-clmm",
  "solana-address-lookup-table-interface",
  "solana-commitment-config",
  "solana-pubkey 3.0.0",
