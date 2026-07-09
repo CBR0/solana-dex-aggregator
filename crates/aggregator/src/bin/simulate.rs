@@ -22,23 +22,30 @@ use solroute_executor::{alt, submit, SwapOptions};
 const EXECUTABLE: [&str; 6] = ["Meteora DAMM V2", "Pumpfun AMM", "Raydium AMM V4", "Meteora DAMM V1", "Meteora DLMM", "Raydium CLMM"];
 const TX_LIMIT: usize = 1232;
 
-/// Find one WSOL-paired pool for `dex`; return (address, other_mint, quoted_out).
+/// Find the DEEPEST WSOL-paired pool for `dex` (random pools are usually dead —
+/// pick the one with the most WSOL locked so the swap actually has liquidity).
 fn find_wsol_pool(index: &PoolIndex, dex: &str, wsol: Pubkey, amount_in: u64) -> Option<(String, Pubkey, u64)> {
-    index.iter_pools().find_map(|(addr, e)| {
-        if e.dex_name != dex {
-            return None;
-        }
-        let other = if e.quote_mint == wsol {
-            e.base_mint
-        } else if e.base_mint == wsol {
-            e.quote_mint
-        } else {
-            return None;
-        };
-        let dir = if e.quote_mint == wsol { SwapDirection::Buy } else { SwapDirection::Sell };
-        let out = e.market.calculate_output(amount_in, dir).unwrap_or(0);
-        Some((addr.to_string(), other, out))
-    })
+    index
+        .iter_pools()
+        .filter_map(|(addr, e)| {
+            if e.dex_name != dex {
+                return None;
+            }
+            let other = if e.quote_mint == wsol {
+                e.base_mint
+            } else if e.base_mint == wsol {
+                e.quote_mint
+            } else {
+                return None;
+            };
+            let fin = e.market.financials().ok()?;
+            let wsol_depth = if e.quote_mint == wsol { fin.quote_balance } else { fin.base_balance };
+            let dir = if e.quote_mint == wsol { SwapDirection::Buy } else { SwapDirection::Sell };
+            let out = e.market.calculate_output(amount_in, dir).unwrap_or(0);
+            (out > 0).then_some((addr.to_string(), other, out, wsol_depth))
+        })
+        .max_by_key(|(_, _, _, depth)| *depth)
+        .map(|(a, o, out, _)| (a, o, out))
 }
 
 fn hop(addr: String, dex: &str, wsol: Pubkey, other: Pubkey, amount_in: u64, out: u64) -> RouteHop {

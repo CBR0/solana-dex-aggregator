@@ -118,12 +118,22 @@ pub async fn build_hop_instructions(
             raydium_amm_v4::build_swap(rpc, &pool, pool_pubkey, &leg, opts).await
         }
         CachedPool::MeteoraDAMMV1 { pool, .. } => {
+            // token_vault + lp_mint must come from each vault's on-chain state
+            // (not the naive PDA — older vaults differ).
+            let (a_token_vault, a_vault_lp_mint) =
+                meteora_damm_v1::fetch_vault_accounts(rpc, &pool.a_vault).await?;
+            let (b_token_vault, b_vault_lp_mint) =
+                meteora_damm_v1::fetch_vault_accounts(rpc, &pool.b_vault).await?;
             let accounts = DammV1Accounts {
                 pool: pool_pubkey,
                 token_a_mint: pool.token_a_mint,
                 token_b_mint: pool.token_b_mint,
                 a_vault: pool.a_vault,
                 b_vault: pool.b_vault,
+                a_token_vault,
+                b_token_vault,
+                a_vault_lp_mint,
+                b_vault_lp_mint,
                 a_vault_lp: pool.a_vault_lp,
                 b_vault_lp: pool.b_vault_lp,
                 protocol_token_a_fee: pool.protocol_token_a_fee,

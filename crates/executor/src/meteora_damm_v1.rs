@@ -7,6 +7,7 @@
 //! so the swap references each side's vault, token-vault, vault-LP, and vault-LP-mint.
 
 use solana_pubkey::Pubkey;
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
 use solroute_core::{GenericError, TOKEN_PROGRAM};
@@ -21,21 +22,36 @@ pub const VAULT_PROGRAM: Pubkey = Pubkey::from_str_const("24Uqj9JCLxUeoC3hGfh5W3
 /// `swap` discriminator = sha256("global:swap")[..8].
 pub const SWAP_DISCRIMINATOR: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
 
-const TOKEN_VAULT_SEED: &[u8] = b"token_vault";
-const LP_MINT_SEED: &[u8] = b"lp_mint";
+// Vault account (`24Uqj…`) field offsets, verified against on-chain state:
+//   disc(8) enabled(1) vault_bump(1) token_vault_bump(1) total_amount(8)
+//   -> token_vault(32) @19, fee_vault(32), token_mint(32), lp_mint(32) @115
+const VAULT_TOKEN_VAULT_OFFSET: usize = 19;
+const VAULT_LP_MINT_OFFSET: usize = 115;
 
-/// Token vault PDA for a dynamic vault: `["token_vault", vault]`.
-pub fn derive_token_vault(vault: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[TOKEN_VAULT_SEED, vault.as_ref()], &VAULT_PROGRAM).0
+fn read_pubkey(data: &[u8], offset: usize) -> Option<Pubkey> {
+    let bytes: [u8; 32] = data.get(offset..offset + 32)?.try_into().ok()?;
+    Some(Pubkey::new_from_array(bytes))
 }
 
-/// Vault LP-mint PDA: `["lp_mint", vault]`.
-pub fn derive_vault_lp_mint(vault: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[LP_MINT_SEED, vault.as_ref()], &VAULT_PROGRAM).0
+/// The `token_vault` and `lp_mint` a dynamic vault actually uses, read from its
+/// account state (these are NOT always the naive PDAs — older/custom vaults
+/// differ, so reading state is the correct source).
+pub async fn fetch_vault_accounts(
+    rpc: &RpcClient,
+    vault: &Pubkey,
+) -> Result<(Pubkey, Pubkey), GenericError> {
+    let data = rpc.get_account_data(vault).await?;
+    let token_vault = read_pubkey(&data, VAULT_TOKEN_VAULT_OFFSET)
+        .ok_or_else(|| GenericError::from("vault: token_vault out of range"))?;
+    let lp_mint = read_pubkey(&data, VAULT_LP_MINT_OFFSET)
+        .ok_or_else(|| GenericError::from("vault: lp_mint out of range"))?;
+    Ok((token_vault, lp_mint))
 }
 
-/// Pool accounts for a DAMM V1 swap. Populate from the parsed `MeteoraDAMMPool`
-/// (`a_vault`, `b_vault`, `a_vault_lp`, `b_vault_lp`, mints, `protocol_token_{a,b}_fee`).
+/// Pool accounts for a DAMM V1 swap. `a_vault`/`b_vault`/`a_vault_lp`/`b_vault_lp`
+/// and the protocol-fee accounts come from the parsed `MeteoraDAMMPool`; the
+/// `*_token_vault` / `*_vault_lp_mint` come from each vault's state
+/// ([`fetch_vault_accounts`]).
 #[derive(Debug, Clone)]
 pub struct DammV1Accounts {
     pub pool: Pubkey,
@@ -43,6 +59,10 @@ pub struct DammV1Accounts {
     pub token_b_mint: Pubkey,
     pub a_vault: Pubkey,
     pub b_vault: Pubkey,
+    pub a_token_vault: Pubkey,
+    pub b_token_vault: Pubkey,
+    pub a_vault_lp_mint: Pubkey,
+    pub b_vault_lp_mint: Pubkey,
     pub a_vault_lp: Pubkey,
     pub b_vault_lp: Pubkey,
     pub protocol_token_a_fee: Pubkey,
@@ -87,10 +107,10 @@ pub fn build_swap(
         AccountMeta::new(user_destination, false),                    // 2 user destination token
         AccountMeta::new(accounts.a_vault, false),                    // 3 a_vault
         AccountMeta::new(accounts.b_vault, false),                    // 4 b_vault
-        AccountMeta::new(derive_token_vault(&accounts.a_vault), false),// 5 a_token_vault
-        AccountMeta::new(derive_token_vault(&accounts.b_vault), false),// 6 b_token_vault
-        AccountMeta::new(derive_vault_lp_mint(&accounts.a_vault), false), // 7 a_vault_lp_mint
-        AccountMeta::new(derive_vault_lp_mint(&accounts.b_vault), false), // 8 b_vault_lp_mint
+        AccountMeta::new(accounts.a_token_vault, false),              // 5 a_token_vault
+        AccountMeta::new(accounts.b_token_vault, false),              // 6 b_token_vault
+        AccountMeta::new(accounts.a_vault_lp_mint, false),            // 7 a_vault_lp_mint
+        AccountMeta::new(accounts.b_vault_lp_mint, false),            // 8 b_vault_lp_mint
         AccountMeta::new(accounts.a_vault_lp, false),                 // 9 a_vault_lp
         AccountMeta::new(accounts.b_vault_lp, false),                 // 10 b_vault_lp
         AccountMeta::new(protocol_token_fee, false),                  // 11 protocol_token_fee
@@ -124,21 +144,17 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    // From a real mainnet DAMM V1 swap (sig 3DvdXQyVx3wXUvEifK2m...):
-    //   a_vault           = A4NBzSvC6SbwFfBGFd7MAsHyUDGx9kXxWrQdusQ9tJ6z
-    //   a_token_vault [5]  = E2m4WYm3LbbVifVY7KMKAiMcizr2DgrKAgw7P7EZVjRa
-    //   a_vault_lp_mint[7] = GLeewidJLKiCsbMsdrVSwYUMcVhp9Fu4yXkDC7zbDQK7
+    // Vault state offsets verified against on-chain account for
+    //   a_vault E2m4… token_vault @19, lp_mint GLee… @115.
     #[test]
-    fn pda_seeds_match_onchain() {
-        let a_vault = Pubkey::from_str("A4NBzSvC6SbwFfBGFd7MAsHyUDGx9kXxWrQdusQ9tJ6z").unwrap();
-        assert_eq!(
-            derive_token_vault(&a_vault),
-            Pubkey::from_str("E2m4WYm3LbbVifVY7KMKAiMcizr2DgrKAgw7P7EZVjRa").unwrap()
-        );
-        assert_eq!(
-            derive_vault_lp_mint(&a_vault),
-            Pubkey::from_str("GLeewidJLKiCsbMsdrVSwYUMcVhp9Fu4yXkDC7zbDQK7").unwrap()
-        );
+    fn vault_offsets_read_correct_pubkeys() {
+        let mut data = vec![0u8; 200];
+        let tok = Pubkey::from_str("E2m4WYm3LbbVifVY7KMKAiMcizr2DgrKAgw7P7EZVjRa").unwrap();
+        let lp = Pubkey::from_str("GLeewidJLKiCsbMsdrVSwYUMcVhp9Fu4yXkDC7zbDQK7").unwrap();
+        data[VAULT_TOKEN_VAULT_OFFSET..VAULT_TOKEN_VAULT_OFFSET + 32].copy_from_slice(&tok.to_bytes());
+        data[VAULT_LP_MINT_OFFSET..VAULT_LP_MINT_OFFSET + 32].copy_from_slice(&lp.to_bytes());
+        assert_eq!(read_pubkey(&data, VAULT_TOKEN_VAULT_OFFSET), Some(tok));
+        assert_eq!(read_pubkey(&data, VAULT_LP_MINT_OFFSET), Some(lp));
     }
 
     fn pk(n: u8) -> Pubkey {
@@ -152,6 +168,10 @@ mod tests {
             token_b_mint: pk(2),
             a_vault: pk(3),
             b_vault: pk(4),
+            a_token_vault: pk(10),
+            b_token_vault: pk(11),
+            a_vault_lp_mint: pk(12),
+            b_vault_lp_mint: pk(13),
             a_vault_lp: pk(5),
             b_vault_lp: pk(6),
             protocol_token_a_fee: pk(7),
