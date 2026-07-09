@@ -62,12 +62,24 @@ async fn run_stream(store: &AccountStore, registry: &RwLock<PoolRegistry>) -> Re
     // Ensure rustls crypto provider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Build client.
+    // Build client. Default HTTP/2 flow-control windows (64KB) choke
+    // high-rate Yellowstone streams — the server stalls waiting for window
+    // updates and the client falls minutes behind. Large windows + adaptive
+    // sizing let the server send at line rate.
     let mut builder = GeyserGrpcClient::build_from_shared(endpoint.clone())?
         .x_token(token)?
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(STREAM_TIMEOUT)
-        .max_decoding_message_size(MAX_DECODING_SIZE);
+        .max_decoding_message_size(MAX_DECODING_SIZE)
+        .initial_connection_window_size(64 * 1024 * 1024)
+        .initial_stream_window_size(16 * 1024 * 1024)
+        .http2_adaptive_window(true)
+        .buffer_size(2 * 1024 * 1024)
+        .tcp_nodelay(true)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_keep_alive_interval(Duration::from_secs(15))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true);
 
     if endpoint.starts_with("https") {
         builder = builder.tls_config(ClientTlsConfig::new().with_native_roots())?;
