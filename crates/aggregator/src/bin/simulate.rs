@@ -19,7 +19,7 @@ use solroute_aggregator::types::RouteHop;
 use solroute_core::{SwapDirection, WSOL};
 use solroute_executor::{alt, submit, SwapOptions};
 
-const EXECUTABLE: [&str; 3] = ["Meteora DAMM V2", "Pumpfun AMM", "Raydium AMM V4"];
+const EXECUTABLE: [&str; 6] = ["Meteora DAMM V2", "Pumpfun AMM", "Raydium AMM V4", "Meteora DAMM V1", "Meteora DLMM", "Raydium CLMM"];
 const TX_LIMIT: usize = 1232;
 
 /// Find one WSOL-paired pool for `dex`; return (address, other_mint, quoted_out).

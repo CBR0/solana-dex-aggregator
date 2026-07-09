@@ -14,8 +14,9 @@ without external routing or price APIs.
   intermediate hops), and a **reverse-reachability prune** for 3/4-hop search.
 - **Data-driven hubs** — top-K mints by pool degree, unioned with settlement
   seeds (WSOL/USDC/USDT).
-- **Execution (3 DEXs)** — Raydium AMM V4, Meteora DAMM V2, Pumpfun AMM
-  (PumpSwap). Builds swap instructions from parsed pool state, resolves the real
+- **Execution (all 6 DEXs)** — Raydium AMM V4 + CLMM, Meteora DAMM V1/V2 + DLMM,
+  Pumpfun AMM (PumpSwap). Builds swap instructions from parsed pool state
+  (including tick-array / bin-array / dynamic-vault accounts), resolves the real
   token program (SPL Token / Token-2022), signs, and submits.
 - **v0 transactions + Address Lookup Tables** — multi-hop routes that exceed the
   1232-byte legacy limit are compressed via an ALT (on-the-fly creation or a
@@ -33,14 +34,17 @@ without external routing or price APIs.
 | DEX | Routing | Execution |
 |---|:---:|:---:|
 | Raydium AMM V4 | ✅ | ✅ |
+| Raydium CLMM | ✅ | ✅ |
+| Meteora DAMM V1 | ✅ | ✅ |
 | Meteora DAMM V2 | ✅ | ✅ |
+| Meteora DLMM | ✅ | ✅ |
 | Pumpfun AMM (PumpSwap) | ✅ | ✅ |
-| Raydium CLMM | ✅ | ❌ |
-| Meteora DAMM V1 | ✅ | ❌ |
-| Meteora DLMM | ✅ | ❌ |
 
-CLMM / DLMM / DAMM V1 are routable/quotable but not yet executable (tick-array /
-bin-array / dynamic-vault swap building is unimplemented).
+All 6 protocols route **and** execute. Concentrated/bin/vault swaps (CLMM tick
+arrays, DLMM bin arrays, DAMM V1 dynamic vaults) build their variable account
+sets from pool state; CLMM/DLMM use `None` bitmap-extension data (near-price
+swaps, ±512 tick arrays / active bin ± 1) — very large swaps crossing many
+arrays would need the extension account.
 
 ## Quick Start
 
@@ -174,9 +178,12 @@ solroute/
 │   │       └── api.rs                Axum HTTP: /quote, /price, /health
 │   └── executor/                     Swap execution
 │       └── src/
-│           ├── meteora_damm_v2.rs    swap2 builder (14-account layout)
-│           ├── pumpswap.rs           Pump AMM buy/sell (full account fidelity)
 │           ├── raydium_amm_v4.rs     swap_base_in (fetches Serum market from RPC)
+│           ├── raydium_clmm.rs        swap_v2 + tick-array remaining accounts
+│           ├── meteora_damm_v1.rs     vault-based swap (15 accounts)
+│           ├── meteora_damm_v2.rs     swap2 builder (14-account layout)
+│           ├── meteora_dlmm.rs        swap + bin-array remaining accounts
+│           ├── pumpswap.rs           Pump AMM buy/sell (full account fidelity)
 │           ├── ata.rs                ATA create / WSOL wrap / close
 │           ├── alt.rs                Address Lookup Table create/extend/fetch
 │           ├── submit.rs             Compute budget, v0 tx, sign, simulate, send
