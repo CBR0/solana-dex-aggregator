@@ -38,14 +38,27 @@ pub async fn start_streaming(
     registry: Arc<RwLock<PoolRegistry>>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    // Resume from the slot after the last one seen so updates that landed
+    // during the reconnect window are replayed instead of lost.
+    let mut resume = true;
     loop {
-        match run_stream(&store, &registry).await {
+        let from_slot = match store.last_slot() {
+            0 => None,
+            s if resume => Some(s + 1),
+            _ => None,
+        };
+        match run_stream(&store, &registry, from_slot).await {
             Ok(()) => {
                 // Stream ended cleanly (server closed) — reset backoff, reconnect.
                 backoff = Duration::from_secs(1);
+                resume = true;
             }
             Err(e) => {
                 eprintln!("gRPC disconnected: {e}, reconnecting in {backoff:?}");
+                // Drop from_slot on the attempt after a failed resume — some
+                // servers reject it (slot past retention, or unsupported),
+                // which would otherwise fail every reconnect forever.
+                resume = from_slot.is_none();
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
@@ -54,7 +67,11 @@ pub async fn start_streaming(
 }
 
 /// Single connect → subscribe → consume cycle. Returns on stream end or error.
-async fn run_stream(store: &AccountStore, registry: &RwLock<PoolRegistry>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_stream(
+    store: &AccountStore,
+    registry: &RwLock<PoolRegistry>,
+    from_slot: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint =
         std::env::var("GEYSER_ENDPOINT").expect("GEYSER_ENDPOINT env var must be set");
     let token = std::env::var("GEYSER_TOKEN").ok();
@@ -99,9 +116,13 @@ async fn run_stream(store: &AccountStore, registry: &RwLock<PoolRegistry>) -> Re
             },
         )]),
         commitment: Some(CommitmentLevel::Confirmed as i32),
+        from_slot,
         ..Default::default()
     };
 
+    if let Some(s) = from_slot {
+        eprintln!("gRPC subscribing from slot {s}");
+    }
     let mut stream = client.subscribe_once(request).await?;
 
     let mut updates_count: u64 = 0;
