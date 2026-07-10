@@ -28,6 +28,9 @@ const STATS_INTERVAL: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_DECODING_SIZE: usize = 64 * 1024 * 1024;
+/// How often the consume loop wakes to check the idle clock when no
+/// messages are arriving.
+const WATCHDOG_POLL: Duration = Duration::from_secs(5);
 
 /// Streams account updates from Yellowstone gRPC into `store`, forever.
 ///
@@ -125,33 +128,85 @@ async fn run_stream(
     }
     let mut stream = client.subscribe_once(request).await?;
 
+    // Idle watchdog: a dead stream can sit in next() forever without
+    // erroring. Track the last real message — Ping/Pong keepalives do NOT
+    // count — warn after GEYSER_IDLE_WARN_SECS, force a reconnect after
+    // GEYSER_IDLE_TIMEOUT_SECS.
+    let warn_idle = Duration::from_secs(
+        std::env::var("GEYSER_IDLE_WARN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30),
+    );
+    let idle_timeout = Duration::from_secs(
+        std::env::var("GEYSER_IDLE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60),
+    );
+
     let mut updates_count: u64 = 0;
     let mut last_stats = Instant::now();
     let mut last_stats_count: u64 = 0;
+    let mut last_data = Instant::now();
+    let mut warned_idle = false;
 
-    while let Some(msg) = stream.next().await {
+    loop {
+        let msg = match tokio::time::timeout(WATCHDOG_POLL, stream.next()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break, // stream ended cleanly
+            Err(_) => {
+                let idle = last_data.elapsed();
+                if idle >= idle_timeout {
+                    return Err(format!(
+                        "stream idle {}s (no data), forcing reconnect",
+                        idle.as_secs()
+                    )
+                    .into());
+                }
+                if !warned_idle && idle >= warn_idle {
+                    eprintln!(
+                        "gRPC: no data for {}s, reconnect at {}s",
+                        idle.as_secs(),
+                        idle_timeout.as_secs()
+                    );
+                    warned_idle = true;
+                }
+                continue;
+            }
+        };
         let update = msg?;
 
-        if let Some(UpdateOneof::Account(account_update)) = update.update_oneof {
-            if let Some(account) = account_update.account {
-                let Ok(pubkey) = Pubkey::try_from(account.pubkey.as_slice()) else {
-                    continue;
-                };
-                let Ok(owner) = Pubkey::try_from(account.owner.as_slice()) else {
-                    continue;
-                };
-                store.upsert(pubkey, account.data, owner, account.lamports, account_update.slot);
-                updates_count += 1;
+        match update.update_oneof {
+            // Keepalives are not data — do not reset the idle clock.
+            Some(UpdateOneof::Ping(_)) | Some(UpdateOneof::Pong(_)) => {}
+            Some(UpdateOneof::Account(account_update)) => {
+                last_data = Instant::now();
+                warned_idle = false;
+                if let Some(account) = account_update.account {
+                    let Ok(pubkey) = Pubkey::try_from(account.pubkey.as_slice()) else {
+                        continue;
+                    };
+                    let Ok(owner) = Pubkey::try_from(account.owner.as_slice()) else {
+                        continue;
+                    };
+                    store.upsert(pubkey, account.data, owner, account.lamports, account_update.slot);
+                    updates_count += 1;
 
-                // Re-validate pools affected by vault balance changes.
-                // Both Token Program and Token-2022 accounts can be vaults.
-                let is_token_account =
-                    owner == Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-                    || owner == Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
-                if is_token_account {
-                    let mut reg = registry.write().await;
-                    reg.on_vault_update(&pubkey, store);
+                    // Re-validate pools affected by vault balance changes.
+                    // Both Token Program and Token-2022 accounts can be vaults.
+                    let is_token_account =
+                        owner == Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                        || owner == Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+                    if is_token_account {
+                        let mut reg = registry.write().await;
+                        reg.on_vault_update(&pubkey, store);
+                    }
                 }
+            }
+            _ => {
+                last_data = Instant::now();
+                warned_idle = false;
             }
         }
 
