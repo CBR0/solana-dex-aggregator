@@ -25,13 +25,18 @@ pub async fn fetch_all_vaults(
     registry: &PoolRegistry,
     store: &AccountStore,
 ) {
+    // Pumpfun AMM prices from virtual reserves in the pool account, not vault
+    // balances — its calculate_output_live ignores them and it is always
+    // swappable (no vault-funding gate). Skip its vaults: ~1M pools / ~2M
+    // accounts of pure waste in the cold-start fetch.
     let vault_keys: Vec<Pubkey> = registry
         .iter_pools()
+        .filter(|(_, info)| info.dex_name != "Pumpfun AMM")
         .flat_map(|(_, info)| [info.quote_vault, info.base_vault])
         .collect();
 
     let total = vault_keys.len();
-    println!("[cold_start] fetching {} vault accounts", total);
+    println!("[cold_start] fetching {} vault accounts (Pumpfun vaults skipped)", total);
 
     let chunks: Vec<(usize, &[Pubkey])> = vault_keys.chunks(BATCH_SIZE).enumerate().collect();
     let mut fetched = 0usize;
