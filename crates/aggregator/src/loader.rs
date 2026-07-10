@@ -171,10 +171,16 @@ impl PoolLoader {
                         )));
                         return Ok(vec![]);
                     }
-                    // Response too large — try two-phase.
-                    match self.two_phase_fetch(&program, filters, dex, cb).await {
+                    // Response too large — try two-phase (dataSlice discovery
+                    // + getMultipleAccounts). If phase-1 also fails because the
+                    // RPC demands pagination (Helius on cpamd…), page through
+                    // getProgramAccountsV2 as a last resort.
+                    match self.two_phase_fetch(&program, filters.clone(), dex, cb).await {
                         Ok(accounts) => accounts,
-                        Err(_) => continue,
+                        Err(_) => match self.fetch_paginated_v2(&program, filters, dex, cb).await {
+                            Ok(accounts) => accounts,
+                            Err(_) => continue,
+                        },
                     }
                 }
             };
@@ -424,6 +430,68 @@ impl PoolLoader {
                 }
             }
             cb(progress(dex, LoadPhase::FetchingPools));
+        }
+
+        Ok(results)
+    }
+
+    /// Fallback for programs whose account index the RPC won't serve via a
+    /// single `getProgramAccounts` (Helius returns "account index service
+    /// overloaded ... use getProgramAccountsV2 with pagination"). Pages through
+    /// `getProgramAccountsV2` until the cursor is exhausted. Meteora DAMM V2
+    /// (`cpamd…`) hits this on Helius while the other DEX programs do not.
+    async fn fetch_paginated_v2(
+        &self,
+        program_id: &Pubkey,
+        filters: Vec<RpcFilterType>,
+        dex: &str,
+        cb: &ProgressCallback,
+    ) -> Result<Vec<(Pubkey, Account)>, GenericError> {
+        use solana_rpc_client_api::request::RpcRequest;
+
+        #[derive(serde::Deserialize)]
+        struct V2Page {
+            accounts: Vec<solana_rpc_client_api::response::RpcKeyedAccount>,
+            #[serde(rename = "paginationKey")]
+            pagination_key: Option<String>,
+        }
+
+        let filters_json = serde_json::to_value(&filters)?;
+        let mut results: Vec<(Pubkey, Account)> = Vec::new();
+        let mut pagination_key: Option<String> = None;
+
+        loop {
+            let mut cfg = serde_json::json!({
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "filters": filters_json,
+                "limit": 1000,
+            });
+            if let Some(key) = &pagination_key {
+                cfg["paginationKey"] = serde_json::Value::String(key.clone());
+            }
+            let params = serde_json::json!([program_id.to_string(), cfg]);
+
+            let page: V2Page = self
+                .rpc
+                .send(RpcRequest::Custom { method: "getProgramAccountsV2" }, params)
+                .await?;
+
+            for keyed in &page.accounts {
+                let pubkey = match keyed.pubkey.parse::<Pubkey>() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if let Some(account) = keyed.account.decode::<Account>() {
+                    results.push((pubkey, account));
+                }
+            }
+            cb(progress(dex, LoadPhase::FetchingPools));
+
+            match page.pagination_key {
+                Some(key) => pagination_key = Some(key),
+                None => break,
+            }
         }
 
         Ok(results)
