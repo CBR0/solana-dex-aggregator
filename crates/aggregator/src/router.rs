@@ -30,6 +30,15 @@ const MAX_NEIGHBOR_CANDIDATES: usize = 50;
 /// Minimum vault balance (raw units) for a pool to be routable.
 const MIN_VAULT_BALANCE: u64 = 10_000_000; // 0.01 SOL
 
+/// A hop may take at most this fraction (1/N) of the output-side reserve.
+/// Beyond it the per-DEX single-bin / constant-product quote is unreliable — a
+/// real swap that drains most of a pool crosses many bins/ticks and yields far
+/// less. Thin, mispriced pools (esp. DLMM) otherwise quote a huge output off
+/// their active-bin price and win `best_pool`'s max-output selection, inflating
+/// routes by orders of magnitude. Trades exceeding this are dropped so the
+/// router falls back to genuinely deep pools.
+const MAX_OUTPUT_RESERVE_DIVISOR: u64 = 4; // ≤25% of the output-side reserve
+
 pub struct Router<'a> {
     index: &'a PoolIndex,
     max_hops: usize,
@@ -564,22 +573,48 @@ fn simulate_hop(
         return None;
     };
 
-    // Use live data when a provider is available.
-    let output_amount = if let Some(provider) = live {
+    // Use live data when a provider is available. Capture the output-side
+    // reserve so we can reject quotes that would drain an implausible fraction
+    // of the pool (where the single-bin/CP approximation breaks down).
+    let (output_amount, output_reserve) = if let Some(provider) = live {
         let pool_data = provider.pool_account_data(&entry.pool_pubkey);
         let quote_bal = provider.token_balance(&entry.quote_vault);
         let base_bal = provider.token_balance(&entry.base_vault);
-        entry.market.calculate_output_live(
+        let out = entry.market.calculate_output_live(
             amount_in, direction, pool_data.as_deref(), quote_bal, base_bal,
-        ).ok()?
+        ).ok()?;
+        // Output side: Buy yields base, Sell yields quote.
+        let reserve = match direction {
+            SwapDirection::Buy => base_bal,
+            SwapDirection::Sell => quote_bal,
+        };
+        (out, reserve)
     } else {
-        entry.market.calculate_output(amount_in, direction).ok()?
+        let out = entry.market.calculate_output(amount_in, direction).ok()?;
+        let reserve = entry.market.financials().ok().map(|fin| match direction {
+            SwapDirection::Buy => fin.base_balance,
+            SwapDirection::Sell => fin.quote_balance,
+        });
+        (out, reserve.unwrap_or(u64::MAX))
     };
 
     if output_amount == 0 {
         return None;
     }
     if output_amount > amount_in.saturating_mul(1_000_000) {
+        return None;
+    }
+    // Depth gate: reject when the trade would take more than 1/N of the
+    // output reserve — the pool is too thin for this size and its quote is
+    // unreliable (see MAX_OUTPUT_RESERVE_DIVISOR). A reserve of 0 means
+    // "unknown" (vault not yet streamed/fetched into the store), NOT empty —
+    // skip the gate rather than reject a pool whose balance hasn't loaded.
+    // u64::MAX is the offline "no financials" sentinel, also skipped.
+    if output_reserve != 0
+        && output_reserve != u64::MAX
+        && (output_amount as u128) * (MAX_OUTPUT_RESERVE_DIVISOR as u128)
+            > (output_reserve as u128)
+    {
         return None;
     }
 
