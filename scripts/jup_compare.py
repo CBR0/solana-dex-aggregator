@@ -25,22 +25,36 @@ import urllib.request
 WSOL = "So11111111111111111111111111111111111111112"
 JUP_URL = "https://lite-api.jup.ag/swap/v1/quote"
 
-# Curated liquid mints (mainnet). Verify before trusting a surprising result.
+# Curated liquid mints (mainnet): (symbol, mint, decimals).
+# Verify before trusting a surprising result.
 DEFAULT_MINTS = [
-    ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
-    ("USDT", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"),
-    ("JUP", "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"),
-    ("BONK", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"),
-    ("WIF", "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"),
-    ("RAY", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"),
-    ("JTO", "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL"),
-    ("PYTH", "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3"),
-    ("mSOL", "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So"),
-    ("JitoSOL", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"),
-    ("POPCAT", "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"),
-    ("TRUMP", "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN"),
-    ("WEN", "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk"),
+    ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6),
+    ("USDT", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 6),
+    ("JUP", "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", 6),
+    ("BONK", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5),
+    ("WIF", "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", 6),
+    ("RAY", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", 6),
+    ("JTO", "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL", 9),
+    ("PYTH", "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3", 6),
+    ("mSOL", "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", 9),
+    ("JitoSOL", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", 9),
+    ("POPCAT", "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", 9),
+    ("TRUMP", "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN", 6),
+    ("WEN", "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk", 5),
 ]
+
+# Verdict thresholds (bps vs Jupiter). An honest engine sits slightly UNDER
+# a 30-venue aggregator on liquid pairs — beating it by much is a math bug,
+# not a win. Small negative deltas are the success metric.
+INFLATED_ABOVE = 25    # > +25b: our quote likely lies (mispriced pool / bad math)
+LAGGING_BELOW = -150   # < -150b: real coverage/routing gap
+
+
+def fmt_amount(raw, decimals):
+    """Raw integer units -> human amount using the mint's decimals."""
+    if decimals is None:
+        return f"{raw:,}"
+    return f"{raw / 10**decimals:,.6f}"
 
 
 def http_json(url, timeout=15):
@@ -99,16 +113,19 @@ def quote_jupiter(output_mint, amount):
 
 
 def load_mints_file(path):
+    """Lines: "SYMBOL MINT [DECIMALS]" or bare "MINT". Missing decimals -> raw display."""
     mints = []
     with open(path) as f:
         for line in f:
             parts = line.split()
             if not parts or parts[0].startswith("#"):
                 continue
-            if len(parts) >= 2:
-                mints.append((parts[0], parts[1]))
+            if len(parts) >= 3:
+                mints.append((parts[0], parts[1], int(parts[2])))
+            elif len(parts) == 2:
+                mints.append((parts[0], parts[1], None))
             else:
-                mints.append((parts[0][:8], parts[0]))
+                mints.append((parts[0][:8], parts[0], None))
     return mints
 
 
@@ -130,15 +147,16 @@ def main():
         sys.exit(f"engine unreachable at {args.engine} ({e}) — start solroute-engine first")
 
     print(f"\nSOL -> X, {args.amount} SOL in, maxHops={args.max_hops}, {len(mints)} pairs\n")
-    hdr = f"{'pair':<10} {'solroute out':>16} {'jupiter out':>16} {'delta':>9}  {'ms':>5}  route (ours | jup)"
+    hdr = f"{'pair':<10} {'solroute out':>16} {'jupiter out':>16} {'delta':>9}  {'':<8} {'ms':>5}  route (ours | jup)"
     print(hdr)
     print("-" * len(hdr))
 
     deltas = []
-    wins = ties = losses = failures = 0
-    worst = []
+    clean = inflated = lagging = failures = 0
+    inflated_pairs = []
+    lagging_pairs = []
 
-    for symbol, mint in mints:
+    for symbol, mint, decimals in mints:
         ours, our_path, ms = quote_solroute(args.engine, mint, lamports, args.max_hops)
         jup, jup_path = quote_jupiter(mint, lamports)
         time.sleep(args.sleep)
@@ -147,37 +165,50 @@ def main():
             failures += 1
             reason = our_path if ours is None else jup_path
             side = "solroute" if ours is None else "jupiter"
-            print(f"{symbol:<10} {'-':>16} {'-':>16} {'FAIL':>9}         {side}: {reason}")
+            print(f"{symbol:<10} {'-':>16} {'-':>16} {'FAIL':>9}  {'':<8} {side}: {reason}")
             continue
 
         delta_bps = (ours - jup) / jup * 10_000
         deltas.append(delta_bps)
-        if delta_bps > 5:
-            wins += 1
-        elif delta_bps < -5:
-            losses += 1
-            worst.append((delta_bps, symbol, our_path, jup_path))
+        # Verdict: an honest engine sits slightly under Jupiter. Beating it
+        # by much means our quote is wrong, not better.
+        if delta_bps > INFLATED_ABOVE:
+            verdict = "INFLATED"
+            inflated += 1
+            inflated_pairs.append((delta_bps, symbol, our_path, jup_path))
+        elif delta_bps < LAGGING_BELOW:
+            verdict = "lag"
+            lagging += 1
+            lagging_pairs.append((delta_bps, symbol, our_path, jup_path))
         else:
-            ties += 1
+            verdict = "ok"
+            clean += 1
         print(
-            f"{symbol:<10} {ours:>16,} {jup:>16,} {delta_bps:>+8.1f}b  {ms:>5}  {our_path} | {jup_path}"
+            f"{symbol:<10} {fmt_amount(ours, decimals):>16} {fmt_amount(jup, decimals):>16}"
+            f" {delta_bps:>+8.1f}b  {verdict:<8} {ms:>5}  {our_path} | {jup_path}"
         )
 
     print("-" * len(hdr))
     if deltas:
         print(
-            f"\nquoted {len(deltas)}/{len(mints)}  "
-            f"wins {wins} (>+5bps)  ties {ties} (±5bps)  losses {losses} (<-5bps)  fails {failures}"
+            f"\ncorrectness: {clean}/{len(deltas)} ok ({LAGGING_BELOW}b..+{INFLATED_ABOVE}b)  "
+            f"{inflated} INFLATED (>{INFLATED_ABOVE}b: our math lies)  "
+            f"{lagging} lagging (<{LAGGING_BELOW}b: coverage gap)  {failures} fails"
         )
         print(
             f"delta bps: median {statistics.median(deltas):+.1f}  "
             f"mean {statistics.mean(deltas):+.1f}  "
             f"min {min(deltas):+.1f}  max {max(deltas):+.1f}"
         )
-        if worst:
-            print("\nworst losses (coverage gaps live here):")
-            for d, sym, op, jp in sorted(worst)[:5]:
-                print(f"  {sym:<10} {d:+8.1f}bps   ours: {op}   jup: {jp}")
+        print("target: every pair 'ok', small negative deltas — honest engines sit just under Jupiter")
+        if inflated_pairs:
+            print("\ninflated quotes (math bugs live here):")
+            for d, sym, op, jp in sorted(inflated_pairs, reverse=True)[:5]:
+                print(f"  {sym:<10} {d:+10.1f}b   ours: {op}   jup: {jp}")
+        if lagging_pairs:
+            print("\nlagging pairs (coverage gaps live here):")
+            for d, sym, op, jp in sorted(lagging_pairs)[:5]:
+                print(f"  {sym:<10} {d:+10.1f}b   ours: {op}   jup: {jp}")
     else:
         print(f"\nno successful comparisons ({failures} failures)")
 
