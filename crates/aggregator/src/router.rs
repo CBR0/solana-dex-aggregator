@@ -39,6 +39,15 @@ const MIN_VAULT_BALANCE: u64 = 10_000_000; // 0.01 SOL
 /// router falls back to genuinely deep pools.
 const MAX_OUTPUT_RESERVE_DIVISOR: u64 = 4; // ≤25% of the output-side reserve
 
+/// A route may beat the best SURVIVING route with fewer hops by at most this
+/// multiple. Adding a hop adds fees; a longer route massively out-quoting a
+/// shorter one (phantom 3-hops were 100–30,000× the direct route) is
+/// manufacturing value from a mispriced intermediate leg. Generous so a
+/// genuinely better hub path around a dusty direct pool still survives.
+/// Applied ascending by hop count so a rejected phantom 2-hop can never
+/// legitimize a phantom 3-hop (no cascade).
+const MAX_EXTRA_HOP_GAIN: u64 = 3;
+
 pub struct Router<'a> {
     index: &'a PoolIndex,
     max_hops: usize,
@@ -138,6 +147,33 @@ impl<'a> Router<'a> {
             // input → neighbor_in → hub → neighbor_out → output
             self.neighbor_4hop(&input_mint, &output_mint, amount_in, &core_hubs, &mut candidates);
         }
+
+        // Cross-hop sanity: a longer route may not beat the best shorter route
+        // by more than MAX_EXTRA_HOP_GAIN×. Phantom multi-hops compound a
+        // mispriced intermediate leg into outputs orders of magnitude above
+        // the direct route; real hub detours don't. Filter ascending by hop
+        // count so the reference is always a SURVIVING shorter route — a
+        // rejected phantom 2-hop must not legitimize a phantom 3-hop. Only
+        // binds once some shorter route exists to compare against.
+        candidates.sort_unstable_by_key(|r| r.hops.len());
+        let mut shorter_best: u64 = 0; // best among fully-processed shorter levels
+        let mut level_best: u64 = 0;
+        let mut current_len: usize = 0;
+        candidates.retain(|r| {
+            let len = r.hops.len();
+            if len != current_len {
+                shorter_best = shorter_best.max(level_best);
+                level_best = 0;
+                current_len = len;
+            }
+            if shorter_best > 0
+                && r.output_amount > shorter_best.saturating_mul(MAX_EXTRA_HOP_GAIN)
+            {
+                return false;
+            }
+            level_best = level_best.max(r.output_amount);
+            true
+        });
 
         // Sort by output amount descending, truncate to max_routes.
         candidates.sort_unstable_by(|a, b| b.output_amount.cmp(&a.output_amount));
@@ -833,6 +869,22 @@ mod tests {
         assert_eq!(best.hops.len(), 2);
         assert_eq!(best.hops[0].output_mint, wsol);
         assert!(best.output_amount > 0);
+    }
+
+    #[test]
+    fn longer_route_capped_at_multiple_of_shorter() {
+        let (a, b, c) = (mint(1), mint(2), mint(3));
+        let mut index = PoolIndex::new();
+        // Direct A-B: fair, ~1M out.
+        add(&mut index, "ab", a, b, BAL, BAL);
+        // Phantom 2-hop A->C->B: lopsided A-C leg quotes ~100M, far above 3× direct.
+        add(&mut index, "ac", a, c, BAL, BAL * 100);
+        add(&mut index, "cb", c, b, BAL * 100, BAL * 100);
+
+        let quote = Router::new(&index, 2).find_routes(a, b, 1_000_000, 5).unwrap();
+        let best = quote.best().expect("route should exist");
+        assert_eq!(best.hops.len(), 1, "phantom 2-hop outranked direct");
+        assert!(best.output_amount < 2_000_000);
     }
 
     #[test]
