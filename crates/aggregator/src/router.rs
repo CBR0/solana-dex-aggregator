@@ -616,8 +616,8 @@ fn simulate_hop(
         let pool_data = provider.pool_account_data(&entry.pool_pubkey);
         let quote_bal = provider.token_balance(&entry.quote_vault);
         let base_bal = provider.token_balance(&entry.base_vault);
-        let out = entry.market.calculate_output_live(
-            amount_in, direction, pool_data.as_deref(), quote_bal, base_bal,
+        let out = entry.market.calculate_output_live_ex(
+            amount_in, direction, pool_data.as_deref(), quote_bal, base_bal, provider,
         ).ok()?;
         // Output side: Buy yields base, Sell yields quote.
         let reserve = match direction {

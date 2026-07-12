@@ -8,10 +8,12 @@ use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
 use solroute_core::{
-    quote_priority, GenericError, Market,
+    quote_priority, AccountDataProvider, GenericError, Market,
     PoolFees, PoolFinancials, PoolMetadata,
     SwapDirection, infer_mint_decimals,
 };
+
+pub mod quote;
 
 // ---------------------------------------------------------------------------
 // DEX-specific constants
@@ -37,7 +39,11 @@ pub struct StaticParameters {
     pub max_bin_id: i32,
     pub protocol_share: u16,
     pub base_fee_power_factor: u8,
-    pub padding: [u8; 5],
+    /// 0 = Undetermined, 1 = LiquidityMining, 2 = LimitOrder.
+    pub function_type: u8,
+    /// 0 = InputOnly, 1 = OnlyY.
+    pub collect_fee_mode: u8,
+    pub padding: [u8; 3],
 }
 
 #[derive(
@@ -322,6 +328,57 @@ impl Market for MeteoraDlmmMarket {
         };
 
         Ok(output)
+    }
+
+    /// Full bin-traversal quote (ported from Meteora's dlmm-sdk) when the
+    /// provider has the pool's bin arrays; falls back to the single-bin
+    /// approximation when no bin array is in the store yet.
+    fn calculate_output_live_ex(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+        base_vault_balance: u64,
+        provider: &dyn AccountDataProvider,
+    ) -> Result<u64, GenericError> {
+        // Freshest pool state from streamed bytes; fall back to the cached struct.
+        let live_pool: Option<MeteoraDLMMPool> = pool_data
+            .filter(|d| d.len() > 8)
+            .and_then(|d| MeteoraDLMMPool::deserialize(&mut &d[8..]).ok());
+        let pool = live_pool.as_ref().unwrap_or(&self.pool);
+
+        let Ok(pool_pubkey) = self.pool_address.parse::<Pubkey>() else {
+            return self.calculate_output_live(
+                amount_in, direction, pool_data, quote_vault_balance, base_vault_balance,
+            );
+        };
+
+        // swap_for_y = deposit X, receive Y. Normalized Buy spends quote:
+        // quote = token_y when !flipped (so Buy = Y->X), token_x when flipped.
+        let swap_for_y = matches!(
+            (self.flipped, direction),
+            (false, SwapDirection::Sell) | (true, SwapDirection::Buy)
+        );
+
+        let mut found_any = false;
+        let mut get_array = |idx: i32| -> Option<quote::BinArray> {
+            let pda = quote::derive_bin_array_pda(&pool_pubkey, idx);
+            let data = provider.pool_account_data(&pda)?;
+            let arr = quote::BinArray::from_account_bytes(&data)?;
+            found_any = true;
+            Some(arr)
+        };
+
+        let result = quote::quote_exact_in(pool, amount_in, swap_for_y, &mut get_array);
+        match result {
+            // Trust the traversal whenever at least one bin array was
+            // available — including a 0 result (genuinely no liquidity).
+            Some(out) if found_any => Ok(out),
+            _ => self.calculate_output_live(
+                amount_in, direction, pool_data, quote_vault_balance, base_vault_balance,
+            ),
+        }
     }
 
     fn calculate_price_impact(

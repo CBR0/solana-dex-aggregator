@@ -106,6 +106,28 @@ pub trait Market: Send + Sync {
     ) -> Result<u64, GenericError> {
         self.calculate_output(amount_in, direction)
     }
+
+    /// Like `calculate_output_live`, but with access to the full account
+    /// store. Override in DEX crates whose quote needs accounts beyond the
+    /// pool + vaults (DLMM bin arrays, CLMM tick arrays) — pulled from the
+    /// provider by derived PDA. Defaults to `calculate_output_live`.
+    fn calculate_output_live_ex(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+        base_vault_balance: u64,
+        _provider: &dyn AccountDataProvider,
+    ) -> Result<u64, GenericError> {
+        self.calculate_output_live(
+            amount_in,
+            direction,
+            pool_data,
+            quote_vault_balance,
+            base_vault_balance,
+        )
+    }
 }
 
 // ============================================================================
