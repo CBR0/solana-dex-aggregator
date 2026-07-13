@@ -355,6 +355,88 @@ pub async fn fetch_bitmap_extensions(
     println!("[cold_start] bitmap extensions: {matched} matched to pools");
 }
 
+/// Fetch the accounts a DAMM V1 exact quote needs: each pool's vault-LP
+/// token accounts, the (shared, deduped) dynamic-vault state accounts, and
+/// the vault LP mints (parsed out of the fetched vault states). The vault
+/// token accounts themselves are already covered by `fetch_all_vaults`.
+pub async fn fetch_damm_v1_aux(
+    rpc: &RpcClient,
+    registry: &PoolRegistry,
+    store: &AccountStore,
+) {
+    let mut vault_states: Vec<Pubkey> = Vec::new();
+    let mut lp_accounts: Vec<Pubkey> = Vec::new();
+
+    for (_, info) in registry.iter_pools() {
+        if info.dex_name != "Meteora DAMM V1" {
+            continue;
+        }
+        if let Some((a_vault, b_vault, a_lp, b_lp)) =
+            solroute_aggregator::cache::extract_damm_v1_aux(&info.cached_data)
+        {
+            vault_states.push(a_vault);
+            vault_states.push(b_vault);
+            lp_accounts.push(a_lp);
+            lp_accounts.push(b_lp);
+        }
+    }
+    vault_states.sort();
+    vault_states.dedup();
+
+    if vault_states.is_empty() {
+        return;
+    }
+
+    let fetched_lp = fetch_batch_into_store(rpc, store, &lp_accounts).await;
+    let fetched_vaults = fetch_batch_into_store(rpc, store, &vault_states).await;
+
+    // Vault LP mints live inside the vault state: 8-byte discriminator +
+    // enabled(1) + bumps(2) + total_amount(8) + token_vault(32) +
+    // fee_vault(32) + token_mint(32) = offset 115.
+    let mut lp_mints: Vec<Pubkey> = vault_states
+        .iter()
+        .filter_map(|vault_pk| {
+            let data = store.get_data(vault_pk)?;
+            Pubkey::try_from(data.get(115..147)?).ok()
+        })
+        .collect();
+    lp_mints.sort();
+    lp_mints.dedup();
+    let fetched_mints = fetch_batch_into_store(rpc, store, &lp_mints).await;
+
+    println!(
+        "[cold_start] DAMM V1 aux: {fetched_vaults} vault states, {fetched_lp} lp accounts, {fetched_mints} lp mints"
+    );
+}
+
+/// Batch-fetch `keys` via getMultipleAccounts and upsert into the store with
+/// real context slots. Returns the number of accounts stored.
+async fn fetch_batch_into_store(rpc: &RpcClient, store: &AccountStore, keys: &[Pubkey]) -> usize {
+    let mut fetched = 0usize;
+    let chunks: Vec<&[Pubkey]> = keys.chunks(BATCH_SIZE).collect();
+    for window in chunks.chunks(BATCH_CONCURRENCY) {
+        let futures: Vec<_> = window
+            .iter()
+            .map(|chunk| {
+                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+            })
+            .collect();
+        let results = join_all(futures).await;
+        for (chunk, result) in window.iter().zip(results) {
+            if let Ok(response) = result {
+                let slot = response.context.slot;
+                for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
+                    if let Some(account) = maybe_account {
+                        store.upsert(*pubkey, account.data, account.owner, account.lamports, slot);
+                        fetched += 1;
+                    }
+                }
+            }
+        }
+    }
+    fetched
+}
+
 /// Cold-start orchestrator: fetch all on-chain data and validate pools.
 pub async fn cold_start(
     rpc: &RpcClient,
@@ -374,6 +456,9 @@ pub async fn cold_start(
 
     // 4. DLMM bin arrays (depends on bitmap extensions for skip logic).
     fetch_dlmm_bin_arrays(rpc, registry, store).await;
+
+    // 5. DAMM V1 aux (vault states, LP accounts, LP mints) for exact quotes.
+    fetch_damm_v1_aux(rpc, registry, store).await;
 
     // 5. Validate all pools against the now-populated store.
     registry.validate_all(store);

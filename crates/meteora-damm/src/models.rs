@@ -257,7 +257,8 @@ pub struct VaultBumps {
 pub struct LockedProfitTracker {
     pub last_updated_locked_profit: u64,
     pub last_report: u64,
-    pub locked_profile_degradation: u8,
+    /// Rate per second of degradation (u64 on-chain — was mis-declared u8).
+    pub locked_profit_degradation: u64,
 }
 
 #[derive(

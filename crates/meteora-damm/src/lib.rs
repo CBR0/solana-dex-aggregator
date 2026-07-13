@@ -1,4 +1,5 @@
 pub mod models;
+pub mod quote;
 pub mod utils;
 
 pub use models::{
@@ -8,7 +9,7 @@ pub use models::{
 pub use utils::derive_token_vault_address;
 
 use solroute_core::{
-    GenericError, Market, PoolFinancials, PoolFees, PoolMetadata,
+    AccountDataProvider, GenericError, Market, PoolFinancials, PoolFees, PoolMetadata,
     SwapDirection, calculate_price_impact_bps, constant_product_swap, infer_mint_decimals, quote_priority,
 };
 
@@ -244,6 +245,81 @@ impl Market for MeteoraDAMMMarket {
                 }))
             }
         }
+    }
+
+    /// Exact quote (ported from Meteora's dynamic-amm-quote): reserves are
+    /// the pool's LP share of each dynamic vault's unlocked amount, and the
+    /// stable curve is the real stableswap invariant with token multipliers
+    /// and the cached depeg virtual price. Requires vault state, vault LP
+    /// mint, and the pool's vault-LP token accounts from the provider —
+    /// missing accounts reject the pool (no data, no quote).
+    fn calculate_output_live_ex(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        _quote_vault_balance: u64,
+        _base_vault_balance: u64,
+        provider: &dyn AccountDataProvider,
+    ) -> Result<u64, GenericError> {
+        use borsh::BorshDeserialize;
+
+        // Freshest pool state (fees, depeg virtual price); fall back to cached.
+        let live_pool: Option<MeteoraDAMMPool> = pool_data
+            .filter(|d| d.len() > 8)
+            .and_then(|d| MeteoraDAMMPool::deserialize(&mut &d[8..]).ok());
+        let pool = live_pool.as_ref().unwrap_or(&self.pool);
+
+        let need = |pk: &solana_pubkey::Pubkey| -> Result<Vec<u8>, GenericError> {
+            provider
+                .pool_account_data(pk)
+                .ok_or_else(|| "DAMM V1 account not in store".into())
+        };
+
+        let vault_a = quote::parse_vault(&need(&pool.a_vault)?)
+            .ok_or("bad vault A state")?;
+        let vault_b = quote::parse_vault(&need(&pool.b_vault)?)
+            .ok_or("bad vault B state")?;
+        let a_lp_amount = quote::parse_token_amount(&need(&pool.a_vault_lp)?)
+            .ok_or("bad vault A lp account")?;
+        let b_lp_amount = quote::parse_token_amount(&need(&pool.b_vault_lp)?)
+            .ok_or("bad vault B lp account")?;
+        let a_lp_supply = quote::parse_mint_supply(&need(&vault_a.lp_mint)?)
+            .ok_or("bad vault A lp mint")?;
+        let b_lp_supply = quote::parse_mint_supply(&need(&vault_b.lp_mint)?)
+            .ok_or("bad vault B lp mint")?;
+        let a_token_amount = quote::parse_token_amount(&need(&vault_a.token_vault)?)
+            .ok_or("bad vault A token account")?;
+        let b_token_amount = quote::parse_token_amount(&need(&vault_b.token_vault)?)
+            .ok_or("bad vault B token account")?;
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Normalized Buy spends quote. quote = b side when !flipped, a side
+        // when flipped — so input is token A on (!flipped, Sell) | (flipped, Buy).
+        let in_is_a = matches!(
+            (self.flipped, direction),
+            (false, SwapDirection::Sell) | (true, SwapDirection::Buy)
+        );
+
+        let side_a = quote::VaultSide {
+            vault: &vault_a,
+            pool_lp_amount: a_lp_amount,
+            lp_supply: a_lp_supply,
+            vault_token_amount: a_token_amount,
+        };
+        let side_b = quote::VaultSide {
+            vault: &vault_b,
+            pool_lp_amount: b_lp_amount,
+            lp_supply: b_lp_supply,
+            vault_token_amount: b_token_amount,
+        };
+
+        quote::quote_exact_in(pool, amount_in, in_is_a, &side_a, &side_b, current_time)
+            .ok_or_else(|| "DAMM V1 quote failed".into())
     }
 
     fn calculate_price_impact(

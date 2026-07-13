@@ -152,6 +152,22 @@ pub fn extract_dlmm_bin_pda(cached_data: &[u8]) -> Option<(Pubkey, Pubkey)> {
     }
 }
 
+/// Extract the aux account pubkeys a DAMM V1 exact quote needs from its
+/// serialized cached data. Returns `(a_vault, b_vault, a_vault_lp,
+/// b_vault_lp)` or None for non-DAMM-V1 pools.
+pub fn extract_damm_v1_aux(cached_data: &[u8]) -> Option<(Pubkey, Pubkey, Pubkey, Pubkey)> {
+    let cached: CachedPool = bincode::deserialize(cached_data).ok()?;
+    match cached {
+        CachedPool::MeteoraDAMMV1 { pool, .. } => Some((
+            pool.a_vault,
+            pool.b_vault,
+            pool.a_vault_lp,
+            pool.b_vault_lp,
+        )),
+        _ => None,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct CacheHeader {
     version: u32,
