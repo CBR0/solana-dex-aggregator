@@ -19,6 +19,7 @@ pub use solroute_core;
 
 pub use meteora_damm;
 pub use meteora_dlmm;
+pub use orca_whirlpool;
 pub use pumpfun_amm;
 pub use raydium_amm_v4;
 pub use raydium_clmm;

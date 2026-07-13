@@ -355,6 +355,34 @@ pub async fn fetch_bitmap_extensions(
     println!("[cold_start] bitmap extensions: {matched} matched to pools");
 }
 
+/// Fetch Orca Whirlpool tick arrays: the current array plus one neighbor in
+/// each direction per pool (covers near-price swaps both ways; streaming
+/// keeps hot pools' further arrays fresh).
+pub async fn fetch_whirlpool_tick_arrays(
+    rpc: &RpcClient,
+    registry: &PoolRegistry,
+    store: &AccountStore,
+) {
+    let mut all_pdas: Vec<Pubkey> = Vec::new();
+    for (_, info) in registry.iter_pools() {
+        if info.dex_name != "Orca Whirlpool" {
+            continue;
+        }
+        if let Some((_, pdas)) =
+            solroute_aggregator::cache::extract_whirlpool_tick_pdas(&info.cached_data)
+        {
+            all_pdas.extend(pdas);
+        }
+    }
+    all_pdas.sort();
+    all_pdas.dedup();
+    if all_pdas.is_empty() {
+        return;
+    }
+    let fetched = fetch_batch_into_store(rpc, store, &all_pdas).await;
+    println!("[cold_start] whirlpool tick arrays: {fetched}/{} stored", all_pdas.len());
+}
+
 /// Fetch the accounts a DAMM V1 exact quote needs: each pool's vault-LP
 /// token accounts, the (shared, deduped) dynamic-vault state accounts, and
 /// the vault LP mints (parsed out of the fetched vault states). The vault
@@ -459,6 +487,9 @@ pub async fn cold_start(
 
     // 5. DAMM V1 aux (vault states, LP accounts, LP mints) for exact quotes.
     fetch_damm_v1_aux(rpc, registry, store).await;
+
+    // 6. Whirlpool tick arrays for exact quotes.
+    fetch_whirlpool_tick_arrays(rpc, registry, store).await;
 
     // 5. Validate all pools against the now-populated store.
     registry.validate_all(store);

@@ -12,6 +12,7 @@ members = [
     "crates/meteora-damm",
     "crates/meteora-dlmm",
     "crates/pumpfun-amm",
+    "crates/orca-whirlpool",
     "crates/aggregator",
     "crates/engine",
     "crates/executor",
@@ -27,6 +28,7 @@ raydium-amm-v4 = { path = "crates/raydium-amm-v4" }
 raydium-clmm = { path = "crates/raydium-clmm" }
 meteora-damm = { path = "crates/meteora-damm" }
 meteora-dlmm = { path = "crates/meteora-dlmm" }
+orca-whirlpool = { path = "crates/orca-whirlpool" }
 pumpfun-amm = { path = "crates/pumpfun-amm" }
 solroute-engine = { path = "crates/engine" }
 solroute-aggregator = { path = "crates/aggregator" }
@@ -63,7 +65,9 @@ serde_json = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 
 solana-sdk = "3.0"
-solana-pubkey = "3.0"
+# serde + borsh enabled explicitly: transitive enablers moved to pubkey 4.x
+# during resolution, which silently stripped these off the 3.x copy.
+solana-pubkey = { version = "3.0", features = ["serde", "borsh", "curve25519"] }
 solana-system-interface = { version = "3.0", features = ["bincode"] }
 
 spl-associated-token-account = "8.0"

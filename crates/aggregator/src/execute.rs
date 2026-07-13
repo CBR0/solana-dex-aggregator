@@ -85,6 +85,10 @@ pub async fn build_hop_instructions(
     };
 
     match cached {
+        // Routing/quoting only for now — no swap builder yet.
+        CachedPool::OrcaWhirlpool { .. } => {
+            Err("Orca Whirlpool execution not implemented (routing only)".into())
+        }
         CachedPool::MeteoraDAMMV2 { pool, .. } => {
             let progs = resolve_token_programs(rpc, &[pool.token_a_mint, pool.token_b_mint]).await;
             let accounts = DammV2Accounts {

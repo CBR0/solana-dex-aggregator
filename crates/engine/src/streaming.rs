@@ -21,6 +21,7 @@ const OWNER_PROGRAMS: &[&str] = &[
     "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",   // Meteora DLMM
     "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",   // Pumpfun AMM
     "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi",  // Meteora Dynamic Vault (DAMM V1 vault states)
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",   // Orca Whirlpool
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   // Token Program
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   // Token-2022
 ];

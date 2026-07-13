@@ -30,6 +30,7 @@ raydium-amm-v4 = { path = "../raydium-amm-v4" }
 raydium-clmm = { path = "../raydium-clmm" }
 meteora-damm = { path = "../meteora-damm" }
 meteora-dlmm = { path = "../meteora-dlmm" }
+orca-whirlpool = { path = "../orca-whirlpool" }
 pumpfun-amm = { path = "../pumpfun-amm" }
 solroute-executor = { path = "../executor" }
 

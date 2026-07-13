@@ -17,6 +17,7 @@ use meteora_damm::{MeteoraDAMMMarket, MeteoraDAMMPool, MeteoraDAMMV2Market, Mete
 use meteora_dlmm::{MeteoraDlmmMarket, MeteoraDLMMPool};
 use pumpfun_amm::{PumpfunAmmMarket, PumpfunAmmPool};
 use raydium_amm_v4::{RaydiumAmmV4Market, RaydiumAMMV4};
+use orca_whirlpool::{OrcaWhirlpoolMarket, WhirlpoolPool};
 use raydium_clmm::{RaydiumClmmMarket, RaydiumCLMMPool};
 
 use crate::pool_index::PoolIndex;
@@ -33,6 +34,7 @@ pub enum CachedPool {
     MeteoraDAMMV2 { addr: String, pool: MeteoraDAMMV2Pool, a_bal: u64, b_bal: u64 },
     MeteoraDLMM { addr: String, pool: MeteoraDLMMPool, rx_bal: u64, ry_bal: u64 },
     PumpfunAmm { addr: String, pool: PumpfunAmmPool },
+    OrcaWhirlpool { addr: String, pool: WhirlpoolPool, a_bal: u64, b_bal: u64 },
 }
 
 impl CachedPool {
@@ -88,6 +90,15 @@ impl CachedPool {
                 }).unwrap_or_default();
                 let market = PumpfunAmmMarket::new(pool, addr.clone());
                 make_entry(addr, "Pumpfun AMM", market, cached)
+            }
+            Self::OrcaWhirlpool { addr, pool, a_bal, b_bal } => {
+                let cached = bincode::serialize(&Self::OrcaWhirlpool {
+                    addr: addr.clone(), pool: pool.clone(), a_bal, b_bal,
+                }).unwrap_or_default();
+                let mut market = OrcaWhirlpoolMarket::new(pool, addr.clone());
+                market.vault_a_balance = a_bal;
+                market.vault_b_balance = b_bal;
+                make_entry(addr, "Orca Whirlpool", market, cached)
             }
         }
     }
@@ -147,6 +158,34 @@ pub fn extract_dlmm_bin_pda(cached_data: &[u8]) -> Option<(Pubkey, Pubkey)> {
                 &dlmm_program,
             );
             Some((pool_pubkey, pda))
+        }
+        _ => None,
+    }
+}
+
+/// Extract tick array PDAs around the current tick for an Orca Whirlpool.
+/// Returns the current array plus one neighbor in each direction, covering
+/// near-price swaps both ways. None for non-Whirlpool pools.
+pub fn extract_whirlpool_tick_pdas(cached_data: &[u8]) -> Option<(Pubkey, Vec<Pubkey>)> {
+    let cached: CachedPool = bincode::deserialize(cached_data).ok()?;
+    match cached {
+        CachedPool::OrcaWhirlpool { addr, pool, .. } => {
+            let pool_pubkey = Pubkey::from_str(&addr).ok()?;
+            let ticks_per_array = orca_whirlpool::TICK_ARRAY_SIZE * pool.tick_spacing as i32;
+            if ticks_per_array == 0 {
+                return None;
+            }
+            let start = pool.tick_current_index.div_euclid(ticks_per_array) * ticks_per_array;
+            let pdas = [-1i32, 0, 1]
+                .iter()
+                .map(|off| {
+                    orca_whirlpool::derive_tick_array_pda(
+                        &pool_pubkey,
+                        start + off * ticks_per_array,
+                    )
+                })
+                .collect();
+            Some((pool_pubkey, pdas))
         }
         _ => None,
     }

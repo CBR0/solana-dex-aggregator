@@ -1,0 +1,12 @@
+[package]
+name = "orca-whirlpool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+solroute-core = { path = "../core" }
+solana-pubkey = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+# Orca's official pure math crate — exact swap quoting (tick traversal).
+orca_whirlpools_core = "2.1.0"

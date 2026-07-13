@@ -25,6 +25,7 @@ use meteora_damm::{
 use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
 use pumpfun_amm::{PumpfunAmmPool, PUMPFUN_AMM_PROGRAM};
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
+use orca_whirlpool::{WhirlpoolPool, DISC_WHIRLPOOL, ORCA_WHIRLPOOL_PROGRAM, WHIRLPOOL_LEN};
 use raydium_clmm::{RaydiumCLMMPool, RAYDIUM_CLMM};
 use solroute_core::GenericError;
 
@@ -52,7 +53,7 @@ struct DexDescriptor {
     discriminator: Option<[u8; 8]>,
 }
 
-const DESCRIPTORS: [DexDescriptor; 6] = [
+const DESCRIPTORS: [DexDescriptor; 7] = [
     DexDescriptor {
         name: "Raydium AMM V4",
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
@@ -89,6 +90,12 @@ const DESCRIPTORS: [DexDescriptor; 6] = [
         data_sizes: &[],
         discriminator: Some(DISC_POOL),
     },
+    DexDescriptor {
+        name: "Orca Whirlpool",
+        program_id: ORCA_WHIRLPOOL_PROGRAM,
+        data_sizes: &[WHIRLPOOL_LEN],
+        discriminator: Some(DISC_WHIRLPOOL),
+    },
 ];
 
 pub struct PoolLoader {
@@ -118,16 +125,17 @@ impl PoolLoader {
     ) -> Result<PoolIndex, GenericError> {
         let mut index = PoolIndex::new();
 
-        let (r0, r1, r2, r3, r4, r5) = tokio::join!(
+        let (r0, r1, r2, r3, r4, r5, r6) = tokio::join!(
             self.load_dex(&DESCRIPTORS[0], progress_cb),
             self.load_dex(&DESCRIPTORS[1], progress_cb),
             self.load_dex(&DESCRIPTORS[2], progress_cb),
             self.load_dex(&DESCRIPTORS[3], progress_cb),
             self.load_dex(&DESCRIPTORS[4], progress_cb),
             self.load_dex(&DESCRIPTORS[5], progress_cb),
+            self.load_dex(&DESCRIPTORS[6], progress_cb),
         );
 
-        for result in [r0, r1, r2, r3, r4, r5] {
+        for result in [r0, r1, r2, r3, r4, r5, r6] {
             if let Ok(pools) = result {
                 for (addr, entry) in pools {
                     let _ = index.add_pool(addr, entry);
@@ -257,6 +265,7 @@ impl PoolLoader {
             "Meteora DAMM V2" => self.build_meteora_damm_v2(raw_accounts, cb).await,
             "Meteora DLMM" => self.build_meteora_dlmm(raw_accounts, cb).await,
             "Pumpfun AMM" => self.build_pumpfun(raw_accounts, cb).await,
+            "Orca Whirlpool" => self.build_orca_whirlpool(raw_accounts, cb).await,
             _ => Err(format!("Unknown DEX: {}", desc.name).into()),
         }
     }
@@ -344,6 +353,22 @@ impl PoolLoader {
         let balances = self.batch_fetch_balances(&vault_keys, dex, cb).await?;
         Ok(pools.into_iter().enumerate().map(|(i, (addr, pool))| {
             CachedPool::MeteoraDLMM { addr, pool, rx_bal: balances[i*2], ry_bal: balances[i*2+1] }.into_pool_entry()
+        }).collect())
+    }
+
+    async fn build_orca_whirlpool(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Orca Whirlpool";
+        let mut pools = Vec::new();
+        for (pubkey, account) in &accounts {
+            if let Ok(pool) = deser_anchor::<WhirlpoolPool>(&account.data) {
+                pools.push((pubkey.to_string(), pool));
+            }
+        }
+        let vault_keys: Vec<Pubkey> = pools.iter().flat_map(|(_, p)| [p.token_vault_a, p.token_vault_b]).collect();
+        cb(progress(dex, LoadPhase::FetchingBalances { done: 0, total: pools.len() }));
+        let balances = self.batch_fetch_balances(&vault_keys, dex, cb).await?;
+        Ok(pools.into_iter().enumerate().map(|(i, (addr, pool))| {
+            CachedPool::OrcaWhirlpool { addr, pool, a_bal: balances[i*2], b_bal: balances[i*2+1] }.into_pool_entry()
         }).collect())
     }
 
