@@ -361,6 +361,26 @@ impl Market for MeteoraDlmmMarket {
             (false, SwapDirection::Sell) | (true, SwapDirection::Buy)
         );
 
+        // Staleness gate: a swap writes the pool AND its active bin array in
+        // the same transaction, so an active array much older than the pool
+        // account means we missed bin updates — quoting on it manufactures
+        // phantom liquidity. Reject instead. Slot 0 = age unknown (offline
+        // provider), skip the check.
+        const STALE_SLOT_TOLERANCE: u64 = 300; // ~2 minutes
+        let pool_slot = provider
+            .account_data_with_slot(&pool_pubkey)
+            .map(|(_, s)| s)
+            .unwrap_or(0);
+        if pool_slot > 0 {
+            let active_idx = quote::BinArray::bin_id_to_bin_array_index(pool.active_id);
+            let active_pda = quote::derive_bin_array_pda(&pool_pubkey, active_idx);
+            if let Some((_, arr_slot)) = provider.account_data_with_slot(&active_pda) {
+                if arr_slot > 0 && arr_slot + STALE_SLOT_TOLERANCE < pool_slot {
+                    return Err("stale bin arrays (active array predates pool state)".into());
+                }
+            }
+        }
+
         let mut found_any = false;
         let mut get_array = |idx: i32| -> Option<quote::BinArray> {
             let pda = quote::derive_bin_array_pda(&pool_pubkey, idx);

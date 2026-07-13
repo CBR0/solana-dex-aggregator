@@ -26,17 +26,24 @@ impl AccountStore {
         }
     }
 
+    /// Insert or update an account. Slot-guarded: an incoming write with an
+    /// older slot than the stored one is dropped — a slow cold-start fetch
+    /// must never clobber fresher streamed data (the write race that leaves
+    /// quiet pools permanently stale).
     pub fn upsert(&self, pubkey: Pubkey, data: Vec<u8>, owner: Pubkey, lamports: u64, slot: u64) {
-        let is_new = !self.accounts.contains_key(&pubkey);
-        self.accounts.insert(
-            pubkey,
-            AccountData {
-                data,
-                owner,
-                lamports,
-                slot,
-            },
-        );
+        let mut is_new = true;
+        match self.accounts.entry(pubkey) {
+            dashmap::mapref::entry::Entry::Occupied(mut e) => {
+                is_new = false;
+                if slot < e.get().slot {
+                    return; // stale write — keep the newer data
+                }
+                e.insert(AccountData { data, owner, lamports, slot });
+            }
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(AccountData { data, owner, lamports, slot });
+            }
+        }
         if is_new {
             self.account_count.fetch_add(1, Ordering::Relaxed);
         }
@@ -44,6 +51,11 @@ impl AccountStore {
         if slot > prev {
             self.last_slot.store(slot, Ordering::Relaxed);
         }
+    }
+
+    /// Account data together with the slot it was written at.
+    pub fn get_data_with_slot(&self, pubkey: &Pubkey) -> Option<(Vec<u8>, u64)> {
+        self.accounts.get(pubkey).map(|v| (v.data.clone(), v.slot))
     }
 
     pub fn get_data(&self, pubkey: &Pubkey) -> Option<Vec<u8>> {
@@ -82,5 +94,9 @@ impl AccountDataProvider for AccountStore {
 
     fn token_balance(&self, vault_pubkey: &Pubkey) -> u64 {
         self.read_token_balance(vault_pubkey)
+    }
+
+    fn account_data_with_slot(&self, pubkey: &Pubkey) -> Option<(Vec<u8>, u64)> {
+        self.get_data_with_slot(pubkey)
     }
 }

@@ -171,4 +171,10 @@ pub trait AccountDataProvider: Send + Sync {
 
     /// SPL token account balance (offset 64..72 in token account data).
     fn token_balance(&self, vault_pubkey: &Pubkey) -> u64;
+
+    /// Account data together with the slot it was last written at.
+    /// Slot 0 means "age unknown" — callers must not treat it as stale.
+    fn account_data_with_slot(&self, pubkey: &Pubkey) -> Option<(Vec<u8>, u64)> {
+        self.pool_account_data(pubkey).map(|d| (d, 0))
+    }
 }

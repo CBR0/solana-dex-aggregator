@@ -45,21 +45,26 @@ pub async fn fetch_all_vaults(
     for window in chunks.chunks(BATCH_CONCURRENCY) {
         let futures: Vec<_> = window
             .iter()
-            .map(|(_, chunk)| rpc.get_multiple_accounts(chunk))
+            .map(|(_, chunk)| {
+                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+            })
             .collect();
         let results = join_all(futures).await;
 
         for ((_, chunk), result) in window.iter().zip(results) {
             match result {
-                Ok(accounts) => {
-                    for (pubkey, maybe_account) in chunk.iter().zip(accounts) {
+                Ok(response) => {
+                    // Stamp with the real context slot so the store's slot
+                    // guard can order these writes against streamed updates.
+                    let slot = response.context.slot;
+                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
                         if let Some(account) = maybe_account {
                             store.upsert(
                                 *pubkey,
                                 account.data,
                                 account.owner,
                                 account.lamports,
-                                0,
+                                slot,
                             );
                             fetched += 1;
                         }
@@ -141,21 +146,26 @@ pub async fn fetch_tick_arrays(
     for window in chunks.chunks(BATCH_CONCURRENCY) {
         let futures: Vec<_> = window
             .iter()
-            .map(|chunk| rpc.get_multiple_accounts(chunk))
+            .map(|chunk| {
+                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+            })
             .collect();
         let results = join_all(futures).await;
 
         for (chunk, result) in window.iter().zip(results) {
             match result {
-                Ok(accounts) => {
-                    for (pubkey, maybe_account) in chunk.iter().zip(accounts) {
+                Ok(response) => {
+                    // Real context slot — lets the store's slot guard order
+                    // these writes against streamed updates.
+                    let slot = response.context.slot;
+                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
                         if let Some(account) = maybe_account {
                             store.upsert(
                                 *pubkey,
                                 account.data,
                                 account.owner,
                                 account.lamports,
-                                0,
+                                slot,
                             );
                             fetched += 1;
                         }
@@ -232,21 +242,26 @@ pub async fn fetch_dlmm_bin_arrays(
     for window in chunks.chunks(BATCH_CONCURRENCY) {
         let futures: Vec<_> = window
             .iter()
-            .map(|chunk| rpc.get_multiple_accounts(chunk))
+            .map(|chunk| {
+                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+            })
             .collect();
         let results = join_all(futures).await;
 
         for (chunk, result) in window.iter().zip(results) {
             match result {
-                Ok(accounts) => {
-                    for (pubkey, maybe_account) in chunk.iter().zip(accounts) {
+                Ok(response) => {
+                    // Real context slot — lets the store's slot guard order
+                    // these writes against streamed updates.
+                    let slot = response.context.slot;
+                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
                         if let Some(account) = maybe_account {
                             store.upsert(
                                 *pubkey,
                                 account.data,
                                 account.owner,
                                 account.lamports,
-                                0,
+                                slot,
                             );
                             fetched += 1;
                         }
@@ -279,6 +294,10 @@ pub async fn fetch_bitmap_extensions(
         Ok(pk) => pk,
         Err(_) => return,
     };
+
+    // Slot taken BEFORE the fetch: a lower-bound stamp, so any streamed
+    // update racing this GPA wins in the store's slot guard.
+    let fetch_slot = rpc.get_slot().await.unwrap_or(0);
 
     let config = RpcProgramAccountsConfig {
         filters: Some(vec![RpcFilterType::DataSize(12488)]),
@@ -323,7 +342,7 @@ pub async fn fetch_bitmap_extensions(
         // lb_pair (pool address) at offset 8, 32 bytes.
         let lb_pair = Pubkey::try_from(&account.data[8..40]).unwrap();
 
-        store.upsert(pubkey, account.data, account.owner, account.lamports, 0);
+        store.upsert(pubkey, account.data, account.owner, account.lamports, fetch_slot);
 
         if let Some(pool_addr) = pool_lookup.get(&lb_pair) {
             if let Some(pool_info) = registry.get_pool_mut(pool_addr) {
