@@ -395,9 +395,11 @@ impl Market for MeteoraDlmmMarket {
             // Trust the traversal whenever at least one bin array was
             // available — including a 0 result (genuinely no liquidity).
             Some(out) if found_any => Ok(out),
-            _ => self.calculate_output_live(
-                amount_in, direction, pool_data, quote_vault_balance, base_vault_balance,
-            ),
+            // No bin array in the store: either the pool's active array was
+            // never initialized on-chain (zombie pool — can't actually trade)
+            // or it hasn't been fetched. Falling back to the single-bin
+            // approximation here quoted phantom prices; reject instead.
+            _ => Err("DLMM bin arrays unavailable".into()),
         }
     }
 
