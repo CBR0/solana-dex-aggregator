@@ -374,12 +374,15 @@ impl Market for RaydiumClmmMarket {
             return approx(self);
         };
 
-        // Real fee rate from the AmmConfig account.
+        // Real fee rate from the AmmConfig account. No config in the store =
+        // no honest quote (the old 25bps-hardcoded approximation overquoted
+        // low-fee pools and underpriced high-fee ones — simulation showed
+        // -124bps real slippage on routes it admitted).
         let Some(fee_rate) = provider
             .pool_account_data(&pool.amm_config)
             .and_then(|d| quote::parse_amm_config_trade_fee_rate(&d))
         else {
-            return approx(self);
+            return Err("CLMM amm config unavailable".into());
         };
 
         // Physical zero_for_one: token_0 in (price down). Normalized Buy
@@ -400,7 +403,12 @@ impl Market for RaydiumClmmMarket {
 
         match quote::quote_exact_in(pool, fee_rate, amount_in, zero_for_one, &mut get_array) {
             Some(out) if found_any => Ok(out),
-            _ => approx(self),
+            // No tick array in the store: quoting via the single-price
+            // approximation admitted phantom-rich routes (verified by
+            // simulation). Strict, like DLMM/Whirlpool: no data, no quote.
+            // Tick arrays stream in for any pool that trades, so only
+            // quiet-and-cold long-tail pools go silent.
+            _ => Err("CLMM tick arrays unavailable".into()),
         }
     }
 }

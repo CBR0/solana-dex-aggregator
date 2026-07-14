@@ -64,3 +64,7 @@ path = "src/bin/multihop.rs"
 [[bin]]
 name = "sim-pool"
 path = "src/bin/sim_pool.rs"
+
+[[bin]]
+name = "sim-route"
+path = "src/bin/sim_route.rs"
