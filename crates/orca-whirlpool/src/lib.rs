@@ -124,6 +124,36 @@ pub fn tick_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
     tick_index.div_euclid(ticks_per_array) * ticks_per_array
 }
 
+/// Q64.64 sqrt-price bounds (from the whirlpool program).
+pub const MIN_SQRT_PRICE: u128 = 4295048016;
+pub const MAX_SQRT_PRICE: u128 = 79226673521066979257578248091;
+
+/// Oracle PDA: ["oracle", whirlpool].
+pub fn derive_oracle_pda(whirlpool: &Pubkey) -> Pubkey {
+    let program_id = Pubkey::from_str_const(ORCA_WHIRLPOOL_PROGRAM);
+    Pubkey::find_program_address(&[b"oracle", whirlpool.as_ref()], &program_id).0
+}
+
+/// The three tick-array pubkeys the `swap` instruction needs (tick_array_0/1/2),
+/// in swap-traversal order: tick_array_0 is the current array, then the swap
+/// advances by one array per slot in the price direction (down for a_to_b, up
+/// for b_to_a).
+pub fn swap_tick_array_pdas(
+    whirlpool: &Pubkey,
+    tick_current_index: i32,
+    tick_spacing: u16,
+    a_to_b: bool,
+) -> [Pubkey; 3] {
+    let ticks_per_array = TICK_ARRAY_SIZE * tick_spacing as i32;
+    let start = tick_array_start_index(tick_current_index, tick_spacing);
+    let step = if a_to_b { -ticks_per_array } else { ticks_per_array };
+    [
+        derive_tick_array_pda(whirlpool, start),
+        derive_tick_array_pda(whirlpool, start + step),
+        derive_tick_array_pda(whirlpool, start + 2 * step),
+    ]
+}
+
 // ============================================================================
 // Facade conversion
 // ============================================================================

@@ -4458,6 +4458,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "borsh",
+ "orca-whirlpool",
  "raydium-amm-v4",
  "raydium-clmm",
  "solana-address-lookup-table-interface",

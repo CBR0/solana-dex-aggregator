@@ -22,6 +22,7 @@ use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
 use solroute_executor::raydium_amm_v4;
 use solroute_executor::raydium_clmm;
+use solroute_executor::orca_whirlpool as orca_exec;
 use solroute_executor::submit;
 use solroute_executor::{SwapLeg, SwapOptions};
 
@@ -85,9 +86,8 @@ pub async fn build_hop_instructions(
     };
 
     match cached {
-        // Routing/quoting only for now — no swap builder yet.
-        CachedPool::OrcaWhirlpool { .. } => {
-            Err("Orca Whirlpool execution not implemented (routing only)".into())
+        CachedPool::OrcaWhirlpool { pool, .. } => {
+            orca_exec::build_swap(&pool, pool_pubkey, &leg, opts)
         }
         CachedPool::MeteoraDAMMV2 { pool, .. } => {
             let progs = resolve_token_programs(rpc, &[pool.token_a_mint, pool.token_b_mint]).await;

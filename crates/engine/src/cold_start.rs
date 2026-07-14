@@ -435,35 +435,61 @@ pub async fn refresh_hot_vaults_loop(
     // Vault set is stable across the process; compute it once.
     let mut keys: Vec<Pubkey> = {
         let reg = registry.read().await;
-        let mut ranked: Vec<(u128, Pubkey, Pubkey)> = reg
+        // Rank by the QUOTE side only: it is always a settlement currency
+        // (WSOL/USDC/USDT) with sane magnitude. Summing raw quote+base across
+        // mismatched decimals let high-raw-supply junk tokens outrank real
+        // pools and evict SOL/USDC from the hot set entirely.
+        let mut ranked: Vec<(u128, &crate::pool_registry::PoolInfo)> = reg
             .iter_pools()
             .filter(|(_, info)| {
                 info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
             })
-            .filter_map(|(_, info)| {
-                // Rank by the QUOTE side only: it is always a settlement
-                // currency (WSOL/USDC/USDT) with sane magnitude. Summing raw
-                // quote+base across mismatched decimals let high-raw-supply
-                // junk tokens outrank real pools and evicted SOL/USDC from
-                // the hot set entirely.
-                let fin = info.market.financials().ok()?;
-                Some((fin.quote_balance as u128, info.quote_vault, info.base_vault))
-            })
+            .filter_map(|(_, info)| Some((info.market.financials().ok()?.quote_balance as u128, info)))
             .collect();
         ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
         ranked.truncate(limit);
-        let mut ks = Vec::with_capacity(limit * 2);
-        for (_, q, b) in ranked {
-            ks.push(q);
-            ks.push(b);
+
+        let mut ks = Vec::with_capacity(limit * 4);
+        for (_, info) in ranked {
+            ks.push(info.quote_vault);
+            ks.push(info.base_vault);
+            // DAMM V1's exact quote also reads the dynamic-vault STATE
+            // accounts, the pool's vault-LP token accounts, and the vault LP
+            // mints (for the LP-share -> token conversion). These don't stream
+            // and go stale (~16min observed) -> keep them in the poll set.
+            if info.dex_name == "Meteora DAMM V1" {
+                if let Some((a_vault, b_vault, a_lp, b_lp)) =
+                    solroute_aggregator::cache::extract_damm_v1_aux(&info.cached_data)
+                {
+                    ks.push(a_vault);
+                    ks.push(b_vault);
+                    ks.push(a_lp);
+                    ks.push(b_lp);
+                }
+            }
         }
         ks.sort_unstable();
         ks.dedup();
         ks
     };
-    // DAMM V1 also needs the dynamic-vault token accounts fresh (its exact
-    // quote reads them); those are the `token_vault` inside each vault state,
-    // already covered by the pool's quote/base vaults above for the AMM side.
+    // LP mints live inside the (now-fetched-at-cold-start) vault states at
+    // offset 8+1+2+8+32+32 = 83 (disc + enabled + bumps + total + token_vault
+    // + fee_vault), pubkey 83..115. Add any we can resolve from the store.
+    {
+        let extra: Vec<Pubkey> = keys
+            .iter()
+            .filter_map(|pk| {
+                let data = store.get_data(pk)?;
+                if data.len() != 1232 {
+                    return None; // not a vault state
+                }
+                Pubkey::try_from(data.get(115..147)?).ok()
+            })
+            .collect();
+        keys.extend(extra);
+        keys.sort_unstable();
+        keys.dedup();
+    }
     keys.shrink_to_fit();
 
     if keys.is_empty() {
