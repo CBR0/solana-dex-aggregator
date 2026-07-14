@@ -69,6 +69,8 @@ fn vault_list_filters(
             info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
         })
         .filter_map(|(_, info)| {
+            // Rank by the quote (settlement) side only — see cold_start
+            // refresh_hot_vaults_loop for why quote+base raw-sum is wrong.
             let fin = info.market.financials().ok()?;
             let lp = if info.dex_name == "Meteora DAMM V1" {
                 solroute_aggregator::cache::extract_damm_v1_aux(&info.cached_data)
@@ -77,7 +79,7 @@ fn vault_list_filters(
                 None
             };
             Some((
-                fin.quote_balance as u128 + fin.base_balance as u128,
+                fin.quote_balance as u128,
                 info.quote_vault.to_string(),
                 info.base_vault.to_string(),
                 lp,
@@ -106,6 +108,16 @@ fn vault_list_filters(
             SubscribeRequestFilterAccounts {
                 account: chunk.to_vec(),
                 owner: vec![],
+                // dataSize(165) is REQUIRED even on an explicit account list:
+                // Triton silently starves filterless lanes (verified — the top
+                // SOL/USDC vault stayed frozen 125k slots while its pool
+                // streamed). All vaults + vault-LP accounts are 165-byte SPL
+                // token accounts, so this matches every key in the list.
+                filters: vec![SubscribeRequestFilterAccountsFilter {
+                    filter: Some(
+                        subscribe_request_filter_accounts_filter::Filter::Datasize(165),
+                    ),
+                }],
                 ..Default::default()
             },
         );

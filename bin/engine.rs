@@ -158,6 +158,26 @@ async fn main() {
         }
     });
 
+    // 5b. Hot-vault refresh loop: keeps V4 / DAMM V1 vault balances fresh
+    //     (Triton won't stream token accounts). Bounded ~3s staleness.
+    let refresh_state = state.clone();
+    let refresh_rpc_url = rpc_url.clone();
+    tokio::spawn(async move {
+        let rpc = RpcClient::new_with_timeout_and_commitment(
+            refresh_rpc_url,
+            std::time::Duration::from_secs(30),
+            CommitmentConfig::confirmed(),
+        );
+        cold_start::refresh_hot_vaults_loop(
+            rpc,
+            refresh_state.registry.clone(),
+            refresh_state.store.clone(),
+            20_000,
+            Duration::from_secs(3),
+        )
+        .await;
+    });
+
     // 6. SOL/USD price refresh every 15s.
     let price_state = state.clone();
     let price_rpc_url = rpc_url.clone();

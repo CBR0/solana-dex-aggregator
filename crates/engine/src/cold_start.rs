@@ -415,6 +415,87 @@ pub async fn fetch_whirlpool_tick_arrays(
 /// token accounts, the (shared, deduped) dynamic-vault state accounts, and
 /// the vault LP mints (parsed out of the fetched vault states). The vault
 /// token accounts themselves are already covered by `fetch_all_vaults`.
+/// Periodically refresh vault token accounts for the vault-priced DEXs
+/// (Raydium V4, Meteora DAMM V1) via `getMultipleAccounts`.
+///
+/// These pools price off SPL token-account balances, which Triton/rpcpool
+/// won't stream (neither an explicit account-list lane nor a token-program
+/// owner lane delivers — the former is silently starved, the latter is the
+/// whole-chain firehose that kills the whole subscription). Their POOL
+/// accounts stream fine, but that carries no reserve info. So we poll: the
+/// top `limit` pools by cached balance every `interval`, giving bounded
+/// (~interval) vault staleness. Runs forever as a background task.
+pub async fn refresh_hot_vaults_loop(
+    rpc: RpcClient,
+    registry: std::sync::Arc<tokio::sync::RwLock<PoolRegistry>>,
+    store: std::sync::Arc<AccountStore>,
+    limit: usize,
+    interval: std::time::Duration,
+) {
+    // Vault set is stable across the process; compute it once.
+    let mut keys: Vec<Pubkey> = {
+        let reg = registry.read().await;
+        let mut ranked: Vec<(u128, Pubkey, Pubkey)> = reg
+            .iter_pools()
+            .filter(|(_, info)| {
+                info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
+            })
+            .filter_map(|(_, info)| {
+                // Rank by the QUOTE side only: it is always a settlement
+                // currency (WSOL/USDC/USDT) with sane magnitude. Summing raw
+                // quote+base across mismatched decimals let high-raw-supply
+                // junk tokens outrank real pools and evicted SOL/USDC from
+                // the hot set entirely.
+                let fin = info.market.financials().ok()?;
+                Some((fin.quote_balance as u128, info.quote_vault, info.base_vault))
+            })
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        ranked.truncate(limit);
+        let mut ks = Vec::with_capacity(limit * 2);
+        for (_, q, b) in ranked {
+            ks.push(q);
+            ks.push(b);
+        }
+        ks.sort_unstable();
+        ks.dedup();
+        ks
+    };
+    // DAMM V1 also needs the dynamic-vault token accounts fresh (its exact
+    // quote reads them); those are the `token_vault` inside each vault state,
+    // already covered by the pool's quote/base vaults above for the AMM side.
+    keys.shrink_to_fit();
+
+    if keys.is_empty() {
+        return;
+    }
+    println!(
+        "[refresh] hot-vault refresh loop: {} accounts every {}s",
+        keys.len(),
+        interval.as_secs()
+    );
+
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cycle: u64 = 0;
+    loop {
+        tick.tick().await;
+        let t0 = std::time::Instant::now();
+        let n = fetch_batch_into_store(&rpc, &store, &keys).await;
+        let fetch_ms = t0.elapsed().as_millis();
+        // Log every ~10th cycle to confirm liveness + timing.
+        cycle += 1;
+        if cycle % 10 == 1 {
+            let sample = keys.first().map(|k| store.get(k).map(|a| a.slot)).flatten();
+            println!(
+                "[refresh] cycle {cycle}: {n}/{} fetched in {fetch_ms}ms, sample slot {sample:?}, tip {}",
+                keys.len(),
+                store.last_slot()
+            );
+        }
+    }
+}
+
 pub async fn fetch_damm_v1_aux(
     rpc: &RpcClient,
     registry: &PoolRegistry,
