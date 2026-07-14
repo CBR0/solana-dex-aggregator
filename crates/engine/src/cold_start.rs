@@ -355,6 +355,34 @@ pub async fn fetch_bitmap_extensions(
     println!("[cold_start] bitmap extensions: {matched} matched to pools");
 }
 
+/// Fetch all Raydium CLMM AmmConfig accounts (dataSize 117, a few dozen) so
+/// exact CLMM quoting can read each pool's real trade_fee_rate.
+pub async fn fetch_clmm_amm_configs(rpc: &RpcClient, store: &AccountStore) {
+    let Ok(clmm_program) = Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK") else {
+        return;
+    };
+    let fetch_slot = rpc.get_slot().await.unwrap_or(0);
+    let config = RpcProgramAccountsConfig {
+        filters: Some(vec![RpcFilterType::DataSize(117)]),
+        account_config: RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            commitment: Some(CommitmentConfig::confirmed()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    match rpc.get_program_accounts_with_config(&clmm_program, config).await {
+        Ok(accounts) => {
+            let n = accounts.len();
+            for (pubkey, account) in accounts {
+                store.upsert(pubkey, account.data, account.owner, account.lamports, fetch_slot);
+            }
+            println!("[cold_start] CLMM amm configs: {n} stored");
+        }
+        Err(e) => eprintln!("[cold_start] CLMM amm config fetch failed: {e}"),
+    }
+}
+
 /// Fetch Orca Whirlpool tick arrays: the current array plus one neighbor in
 /// each direction per pool (covers near-price swaps both ways; streaming
 /// keeps hot pools' further arrays fresh).
@@ -490,6 +518,9 @@ pub async fn cold_start(
 
     // 6. Whirlpool tick arrays for exact quotes.
     fetch_whirlpool_tick_arrays(rpc, registry, store).await;
+
+    // 7. CLMM amm configs (real fee rates) for exact quotes.
+    fetch_clmm_amm_configs(rpc, store).await;
 
     // 5. Validate all pools against the now-populated store.
     registry.validate_all(store);

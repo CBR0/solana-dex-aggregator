@@ -2456,6 +2456,7 @@ dependencies = [
  "serde",
  "solana-pubkey 3.0.0",
  "solroute-core",
+ "uint",
 ]
 
 [[package]]

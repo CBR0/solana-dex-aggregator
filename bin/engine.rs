@@ -129,6 +129,7 @@ async fn main() {
             cold_start::fetch_dlmm_bin_arrays(&rpc, &mut reg, &cold_state.store).await;
             cold_start::fetch_damm_v1_aux(&rpc, &reg, &cold_state.store).await;
             cold_start::fetch_whirlpool_tick_arrays(&rpc, &reg, &cold_state.store).await;
+            cold_start::fetch_clmm_amm_configs(&rpc, &cold_state.store).await;
             reg.validate_all(&cold_state.store);
 
             println!("[cold_start] === cold start complete ===");

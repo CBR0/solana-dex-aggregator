@@ -2,6 +2,7 @@
 //!
 //! Tick-based pricing with concentrated liquidity positions.
 
+pub mod quote;
 pub mod tick_arrays;
 
 
@@ -9,8 +10,8 @@ use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
 use solroute_core::{
-    GenericError, Market, PoolFees, PoolFinancials, PoolMetadata, SwapDirection,
-    quote_priority,
+    AccountDataProvider, GenericError, Market, PoolFees, PoolFinancials, PoolMetadata,
+    SwapDirection, quote_priority,
 };
 
 
@@ -341,6 +342,66 @@ impl Market for RaydiumClmmMarket {
         };
 
         Ok(output)
+    }
+
+    /// Exact quote: real tick traversal (ported from Raydium's program) with
+    /// the true trade_fee_rate from the pool's AmmConfig. Falls back to the
+    /// single-price approximation when the config or the first tick array is
+    /// not in the store (keeps coverage; the approximation errs by tens of
+    /// bps, not orders of magnitude).
+    fn calculate_output_live_ex(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+        base_vault_balance: u64,
+        provider: &dyn AccountDataProvider,
+    ) -> Result<u64, GenericError> {
+        let approx = |s: &Self| {
+            s.calculate_output_live(
+                amount_in, direction, pool_data, quote_vault_balance, base_vault_balance,
+            )
+        };
+
+        // Freshest pool state; fall back to the cached struct.
+        let live_pool: Option<RaydiumCLMMPool> = pool_data
+            .filter(|d| d.len() > 8)
+            .and_then(|d| RaydiumCLMMPool::deserialize(&mut &d[8..]).ok());
+        let pool = live_pool.as_ref().unwrap_or(&self.pool);
+
+        let Ok(pool_pubkey) = self.pool_address.parse::<Pubkey>() else {
+            return approx(self);
+        };
+
+        // Real fee rate from the AmmConfig account.
+        let Some(fee_rate) = provider
+            .pool_account_data(&pool.amm_config)
+            .and_then(|d| quote::parse_amm_config_trade_fee_rate(&d))
+        else {
+            return approx(self);
+        };
+
+        // Physical zero_for_one: token_0 in (price down). Normalized Buy
+        // spends quote; quote = mint_0 when !flipped, mint_1 when flipped.
+        let zero_for_one = matches!(
+            (self.flipped, direction),
+            (false, SwapDirection::Buy) | (true, SwapDirection::Sell)
+        );
+
+        let mut found_any = false;
+        let mut get_array = |start_index: i32| -> Option<quote::ClmmTickArray> {
+            let (pda, _) = tick_arrays::pda_tick_array_address(&pool_pubkey, start_index).ok()?;
+            let data = provider.pool_account_data(&pda)?;
+            let arr = quote::ClmmTickArray::from_account_bytes(&data)?;
+            found_any = true;
+            Some(arr)
+        };
+
+        match quote::quote_exact_in(pool, fee_rate, amount_in, zero_for_one, &mut get_array) {
+            Some(out) if found_any => Ok(out),
+            _ => approx(self),
+        }
     }
 }
 
