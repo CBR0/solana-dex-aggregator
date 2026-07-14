@@ -185,23 +185,20 @@ impl Market for RaydiumAmmV4Market {
             / self.pool.trade_fee_denominator as f64
             * 10000.0) as u64;
 
-        // Same flipping logic as calculate_output: when flipped, the caller's
-        // normalized quote/base are already swapped, but the swap math expects
-        // physical orientation, so we swap them back.
-        let (quote_bal, base_bal) = if self.flipped {
-            (base_vault_balance, quote_vault_balance)
-        } else {
-            (quote_vault_balance, base_vault_balance)
-        };
-
+        // The caller passes NORMALIZED-side balances (read from
+        // entry.quote_vault / entry.base_vault), and `direction` is also
+        // normalized — they are already consistent. No flip belongs here:
+        // re-swapping the balances for flipped pools inverted the reserves
+        // and quoted the main SOL-USDC pool at 163x (dormant until live
+        // pool bytes started arriving via Geyser and enabled this path).
         match direction {
             SwapDirection::Buy => {
-                // Quote -> Base
-                constant_product_swap(quote_bal, base_bal, amount_in, fee_bps)
+                // Normalized quote -> base.
+                constant_product_swap(quote_vault_balance, base_vault_balance, amount_in, fee_bps)
             }
             SwapDirection::Sell => {
-                // Base -> Quote
-                constant_product_swap(base_bal, quote_bal, amount_in, fee_bps)
+                // Normalized base -> quote.
+                constant_product_swap(base_vault_balance, quote_vault_balance, amount_in, fee_bps)
             }
         }
     }

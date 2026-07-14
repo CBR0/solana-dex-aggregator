@@ -4438,6 +4438,7 @@ dependencies = [
  "futures",
  "rustls",
  "serde",
+ "serde_json",
  "solana-account-decoder-client-types",
  "solana-commitment-config",
  "solana-pubkey 3.0.0",

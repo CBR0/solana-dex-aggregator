@@ -12,19 +12,106 @@ use yellowstone_grpc_proto::prelude::subscribe_update::UpdateOneof;
 use crate::account_store::AccountStore;
 use crate::pool_registry::PoolRegistry;
 
-/// DEX program IDs + Token Program to subscribe to.
-const OWNER_PROGRAMS: &[&str] = &[
-    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium V4
-    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium CLMM
-    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB", // Meteora DAMM V1
-    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",   // Meteora DAMM V2
-    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",   // Meteora DLMM
-    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",   // Pumpfun AMM
-    "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi",  // Meteora Dynamic Vault (DAMM V1 vault states)
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",   // Orca Whirlpool
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   // Token Program
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   // Token-2022
+/// Account subscriptions, one named filter per (program, account shape).
+/// Two hard-won rules (Triton/rpcpool, verified empirically):
+/// 1. Bare owner-only filters are silently starved — every filter MUST carry
+///    a dataSize or memcmp. The integration tests stream fine with dataSize
+///    filters against the same endpoint; owner-only got 0 updates forever.
+/// 2. Filters must be split per program — one broad multi-owner filter can
+///    kill the whole stream, and a rejected firehose must not poison the
+///    pool-update lanes.
+/// dataSize where the account is fixed-size, discriminator memcmp otherwise.
+enum Shape {
+    Size(u64),
+    Disc([u8; 8]),
+}
+
+const ACCOUNT_SUBS: &[(&str, &str, Shape)] = &[
+    // Pool state (quote-critical).
+    ("raydium_v4_pool", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", Shape::Size(752)),
+    ("raydium_clmm_pool", "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", Shape::Size(1544)),
+    ("damm_v1_pool", "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB", Shape::Size(944)),
+    ("damm_v2_pool", "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG", Shape::Size(1112)),
+    ("dlmm_pool", "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", Shape::Size(904)),
+    // Pumpfun pool size varies across versions — match the Pool discriminator.
+    ("pumpfun_pool", "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA", Shape::Disc([241, 154, 109, 4, 17, 177, 109, 188])),
+    ("whirlpool_pool", "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", Shape::Size(653)),
+    // Tick / bin arrays + aux (exact-quote inputs).
+    ("clmm_tick_array", "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", Shape::Size(10240)),
+    ("clmm_amm_config", "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", Shape::Size(117)),
+    ("dlmm_bin_array", "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", Shape::Size(10136)),
+    ("dlmm_bitmap_ext", "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", Shape::Size(12488)),
+    ("whirlpool_tick_array", "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", Shape::Size(9988)),
+    // DAMM V1 dynamic vault state (Vault discriminator).
+    ("meteora_vault_state", "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi", Shape::Disc([211, 8, 232, 43, 2, 152, 117, 119])),
+    // NOTE: no token-program owner lanes. The whole-chain token firehose
+    // (owner=Tokenkeg + dataSize 165) makes Triton silence the ENTIRE
+    // subscription — verified by binary search over lanes. Vault balances
+    // stream via explicit account-list lanes instead (vault_list_filters).
 ];
+
+/// Top-N pools (by cached vault balance) whose vault token accounts get
+/// explicit account-list subscriptions. Only Raydium V4 and DAMM V1 price
+/// off vault balances; the other venues carry price in the pool account.
+const VAULT_LIST_POOLS: usize = 15_000;
+/// Keys per named account-list filter (bounds per-filter request size).
+const VAULT_LIST_CHUNK: usize = 5_000;
+
+/// Build explicit vault account-list filters from the registry: the hot set
+/// of V4 / DAMM V1 pools ranked by cached balances, plus DAMM V1 vault-LP
+/// token accounts (exact quoting reads them). Cheap: cached financials only.
+fn vault_list_filters(
+    registry: &PoolRegistry,
+) -> HashMap<String, SubscribeRequestFilterAccounts> {
+    let mut ranked: Vec<(u128, String, String, Option<(String, String)>)> = registry
+        .iter_pools()
+        .filter(|(_, info)| {
+            info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
+        })
+        .filter_map(|(_, info)| {
+            let fin = info.market.financials().ok()?;
+            let lp = if info.dex_name == "Meteora DAMM V1" {
+                solroute_aggregator::cache::extract_damm_v1_aux(&info.cached_data)
+                    .map(|(_, _, a_lp, b_lp)| (a_lp.to_string(), b_lp.to_string()))
+            } else {
+                None
+            };
+            Some((
+                fin.quote_balance as u128 + fin.base_balance as u128,
+                info.quote_vault.to_string(),
+                info.base_vault.to_string(),
+                lp,
+            ))
+        })
+        .collect();
+    ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    ranked.truncate(VAULT_LIST_POOLS);
+
+    let mut keys: Vec<String> = Vec::with_capacity(VAULT_LIST_POOLS * 2);
+    for (_, quote_vault, base_vault, lp) in ranked {
+        keys.push(quote_vault);
+        keys.push(base_vault);
+        if let Some((a_lp, b_lp)) = lp {
+            keys.push(a_lp);
+            keys.push(b_lp);
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+
+    let mut filters = HashMap::new();
+    for (i, chunk) in keys.chunks(VAULT_LIST_CHUNK).enumerate() {
+        filters.insert(
+            format!("vault_list_{i}"),
+            SubscribeRequestFilterAccounts {
+                account: chunk.to_vec(),
+                owner: vec![],
+                ..Default::default()
+            },
+        );
+    }
+    filters
+}
 
 const STATS_INTERVAL: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,6 +129,29 @@ pub async fn start_streaming(
     store: Arc<AccountStore>,
     registry: Arc<RwLock<PoolRegistry>>,
 ) {
+    // Vault revalidation runs OFF the consume loop: taking the registry
+    // write lock inline stalls the stream whenever cold-start holds the
+    // lock for minutes — the server's send buffer fills and it cuts the
+    // connection ("Unexpected EOF"). The consume loop only pushes pubkeys
+    // into this channel; the drainer batches them per lock acquisition.
+    let (vault_tx, mut vault_rx) = tokio::sync::mpsc::unbounded_channel::<Pubkey>();
+    {
+        let registry = registry.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            while let Some(first) = vault_rx.recv().await {
+                let mut batch = vec![first];
+                while let Ok(more) = vault_rx.try_recv() {
+                    batch.push(more);
+                }
+                let mut reg = registry.write().await;
+                for pubkey in &batch {
+                    reg.on_vault_update(pubkey, &store);
+                }
+            }
+        });
+    }
+
     let mut backoff = Duration::from_secs(1);
     // Resume from the slot after the last one seen so updates that landed
     // during the reconnect window are replayed instead of lost.
@@ -52,7 +162,7 @@ pub async fn start_streaming(
             s if resume => Some(s + 1),
             _ => None,
         };
-        match run_stream(&store, &registry, from_slot).await {
+        match run_stream(&store, &registry, from_slot, &vault_tx).await {
             Ok(()) => {
                 // Stream ended cleanly (server closed) — reset backoff, reconnect.
                 backoff = Duration::from_secs(1);
@@ -76,6 +186,7 @@ async fn run_stream(
     store: &AccountStore,
     registry: &RwLock<PoolRegistry>,
     from_slot: Option<u64>,
+    vault_tx: &tokio::sync::mpsc::UnboundedSender<Pubkey>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint =
         std::env::var("GEYSER_ENDPOINT").expect("GEYSER_ENDPOINT env var must be set");
@@ -84,24 +195,30 @@ async fn run_stream(
     // Ensure rustls crypto provider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Build client. Default HTTP/2 flow-control windows (64KB) choke
-    // high-rate Yellowstone streams — the server stalls waiting for window
-    // updates and the client falls minutes behind. Large windows + adaptive
-    // sizing let the server send at line rate.
+    // Build client. HTTP/2 flow-control tuning (large windows + adaptive
+    // sizing) helps high-rate streams on some providers but SILENTLY STARVES
+    // the stream on others — Triton/rpcpool accepted the subscribe yet
+    // delivered zero account updates until the tuning was removed (verified
+    // empirically; the plain builder streams fine). Opt in per provider with
+    // GEYSER_HTTP2_TUNING=1.
     let mut builder = GeyserGrpcClient::build_from_shared(endpoint.clone())?
         .x_token(token)?
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(STREAM_TIMEOUT)
-        .max_decoding_message_size(MAX_DECODING_SIZE)
-        .initial_connection_window_size(64 * 1024 * 1024)
-        .initial_stream_window_size(16 * 1024 * 1024)
-        .http2_adaptive_window(true)
-        .buffer_size(2 * 1024 * 1024)
-        .tcp_nodelay(true)
-        .tcp_keepalive(Some(Duration::from_secs(30)))
-        .http2_keep_alive_interval(Duration::from_secs(15))
-        .keep_alive_timeout(Duration::from_secs(10))
-        .keep_alive_while_idle(true);
+        .max_decoding_message_size(MAX_DECODING_SIZE);
+
+    if std::env::var("GEYSER_HTTP2_TUNING").map(|v| v == "1").unwrap_or(false) {
+        builder = builder
+            .initial_connection_window_size(64 * 1024 * 1024)
+            .initial_stream_window_size(16 * 1024 * 1024)
+            .http2_adaptive_window(true)
+            .buffer_size(2 * 1024 * 1024)
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true);
+    }
 
     if endpoint.starts_with("https") {
         builder = builder.tls_config(ClientTlsConfig::new().with_native_roots())?;
@@ -110,16 +227,45 @@ async fn run_stream(
     let mut client = builder.connect().await?;
     eprintln!("gRPC connected to {endpoint}");
 
-    // Subscribe to all DEX + Token Program account updates.
-    let request = SubscribeRequest {
-        accounts: HashMap::from([(
-            "dex_accounts".to_string(),
+    // Subscribe account lanes — one named filter per (program, shape); every
+    // filter MUST carry dataSize/memcmp (see ACCOUNT_SUBS for why).
+    let mut account_filters: HashMap<String, SubscribeRequestFilterAccounts> = HashMap::new();
+    for (name, program, shape) in ACCOUNT_SUBS {
+        let filter = match shape {
+            Shape::Size(n) => subscribe_request_filter_accounts_filter::Filter::Datasize(*n),
+            Shape::Disc(d) => subscribe_request_filter_accounts_filter::Filter::Memcmp(
+                SubscribeRequestFilterAccountsFilterMemcmp {
+                    offset: 0,
+                    data: Some(
+                        subscribe_request_filter_accounts_filter_memcmp::Data::Bytes(d.to_vec()),
+                    ),
+                },
+            ),
+        };
+        account_filters.insert(
+            name.to_string(),
             SubscribeRequestFilterAccounts {
                 account: vec![],
-                owner: OWNER_PROGRAMS.iter().map(|s| s.to_string()).collect(),
+                owner: vec![program.to_string()],
+                filters: vec![SubscribeRequestFilterAccountsFilter { filter: Some(filter) }],
                 ..Default::default()
             },
-        )]),
+        );
+    }
+
+    // Vault balances: explicit account lists for the hot set (built from the
+    // registry snapshot at each (re)connect, so the set follows the ranking).
+    {
+        let reg = registry.read().await;
+        let vault_filters = vault_list_filters(&reg);
+        let lanes = vault_filters.len();
+        let key_count: usize = vault_filters.values().map(|f| f.account.len()).sum();
+        eprintln!("gRPC vault list: {key_count} accounts across {lanes} lanes");
+        account_filters.extend(vault_filters);
+    }
+
+    let request = SubscribeRequest {
+        accounts: account_filters,
         commitment: Some(CommitmentLevel::Confirmed as i32),
         from_slot,
         ..Default::default()
@@ -201,8 +347,8 @@ async fn run_stream(
                         owner == Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
                         || owner == Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
                     if is_token_account {
-                        let mut reg = registry.write().await;
-                        reg.on_vault_update(&pubkey, store);
+                        // Never block the consume loop on the registry lock.
+                        let _ = vault_tx.send(pubkey);
                     }
                 }
             }

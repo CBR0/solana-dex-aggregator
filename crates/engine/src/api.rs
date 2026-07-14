@@ -40,6 +40,7 @@ pub fn create_router(state: Arc<AppState>) -> axum::Router {
         .route("/quote", get(handle_quote))
         .route("/price", get(handle_price))
         .route("/health", get(handle_health))
+        .route("/account", get(handle_account))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -208,4 +209,33 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthRespons
         last_slot: state.store.last_slot(),
         uptime_seconds: state.start_time.elapsed().as_secs(),
     })
+}
+
+
+// ---------------------------------------------------------------------------
+// GET /account?pubkey= — debug: raw store view of one account
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct AccountParams {
+    pubkey: String,
+}
+
+async fn handle_account(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pk = Pubkey::from_str(&params.pubkey)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    match state.store.get(&pk) {
+        Some(acc) => Ok(Json(serde_json::json!({
+            "len": acc.data.len(),
+            "owner": acc.owner.to_string(),
+            "slot": acc.slot,
+            "lamports": acc.lamports,
+            "token_amount_le_64_72": acc.data.get(64..72).map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+            "first_bytes": acc.data.get(..16),
+        }))),
+        None => Err((StatusCode::NOT_FOUND, "not in store".into())),
+    }
 }
