@@ -185,7 +185,7 @@ def main():
             clean += 1
         print(
             f"{symbol:<10} {fmt_amount(ours, decimals):>16} {fmt_amount(jup, decimals):>16}"
-            f" {delta_bps:>+8.1f}b  {verdict:<8} {ms:>5}  {our_path} | {jup_path}"
+            f" {delta_bps:>+8.1f}bps  {verdict:<8} {ms:>5}  {our_path} | {jup_path}"
         )
 
     print("-" * len(hdr))
@@ -204,11 +204,11 @@ def main():
         if inflated_pairs:
             print("\ninflated quotes (math bugs live here):")
             for d, sym, op, jp in sorted(inflated_pairs, reverse=True)[:5]:
-                print(f"  {sym:<10} {d:+10.1f}b   ours: {op}   jup: {jp}")
+                print(f"  {sym:<10} {d:+10.1f}bps   ours: {op}   jup: {jp}")
         if lagging_pairs:
             print("\nlagging pairs (coverage gaps live here):")
             for d, sym, op, jp in sorted(lagging_pairs)[:5]:
-                print(f"  {sym:<10} {d:+10.1f}b   ours: {op}   jup: {jp}")
+                print(f"  {sym:<10} {d:+10.1f}bps   ours: {op}   jup: {jp}")
     else:
         print(f"\nno successful comparisons ({failures} failures)")
 
