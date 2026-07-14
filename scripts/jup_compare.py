@@ -136,6 +136,7 @@ def main():
     ap.add_argument("--max-hops", type=int, default=3)
     ap.add_argument("--mints-file", help='file: "SYMBOL MINT" or "MINT" per line')
     ap.add_argument("--sleep", type=float, default=1.2, help="pause between Jupiter calls (rate limit)")
+    ap.add_argument("--clean", action="store_true", help="polished, screenshot-ready table")
     args = ap.parse_args()
 
     lamports = int(args.amount * 1_000_000_000)
