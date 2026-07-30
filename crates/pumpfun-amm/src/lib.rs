@@ -417,11 +417,40 @@ impl Market for PumpfunBondingCurveMarket {
         &self,
         amount_in: u64,
         direction: SwapDirection,
-        _pool_data: Option<&[u8]>,
+        pool_data: Option<&[u8]>,
         _quote_vault_balance: u64,
         _base_vault_balance: u64,
     ) -> Result<u64, GenericError> {
-        // Curve state is self-contained in the parsed account; no vault reads.
+        // Re-parse live curve reserves from the streamed curve-account bytes
+        // (reserves change every trade); fall back to the reserves parsed at
+        // load time when no live data is present.
+        if let Some(data) = pool_data {
+            if let Some(curve) = parse_bonding_curve(data) {
+                if curve.complete {
+                    return Err("bonding curve complete (migrated to PumpSwap AMM)".into());
+                }
+                let out = match direction {
+                    SwapDirection::Buy => bc_buy_tokens_out(
+                        curve.virtual_token_reserves as u128,
+                        curve.virtual_sol_reserves as u128,
+                        curve.real_token_reserves as u128,
+                        &curve.creator,
+                        amount_in,
+                    ),
+                    SwapDirection::Sell => bc_sell_sol_out(
+                        curve.virtual_token_reserves as u128,
+                        curve.virtual_sol_reserves as u128,
+                        &curve.creator,
+                        amount_in,
+                    ),
+                };
+                return if out == 0 {
+                    Err("bonding curve produced zero output".into())
+                } else {
+                    Ok(out)
+                };
+            }
+        }
         self.calculate_output(amount_in, direction)
     }
 
@@ -532,5 +561,59 @@ mod bc_tests {
         let mut data = vec![0u8; 120];
         data[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(parse_bonding_curve(&data).is_none());
+    }
+
+    // Serialize a curve to raw account bytes (disc + fields) for live-data tests.
+    fn curve_bytes(vtok: u64, vsol: u64, rtok: u64, rsol: u64, creator: Pubkey) -> Vec<u8> {
+        let mut d = Vec::with_capacity(81);
+        d.extend_from_slice(&DISC_BONDING_CURVE);
+        d.extend_from_slice(&vtok.to_le_bytes());
+        d.extend_from_slice(&vsol.to_le_bytes());
+        d.extend_from_slice(&rtok.to_le_bytes());
+        d.extend_from_slice(&rsol.to_le_bytes());
+        d.extend_from_slice(&1_000_000_000_000_000u64.to_le_bytes()); // total_supply
+        d.push(0u8); // complete = false
+        d.extend_from_slice(creator.as_ref());
+        d
+    }
+
+    #[test]
+    fn live_data_overrides_baked_reserves() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        // Baked (load-time) curve.
+        let m = PumpfunBondingCurveMarket::new(
+            PumpfunBondingCurvePool {
+                mint: Pubkey::default(),
+                bonding_curve: Pubkey::default(),
+                curve: fresh_curve(creator),
+            },
+            "x".into(),
+        );
+        let baked = m.calculate_output(100_000_000, SwapDirection::Buy).unwrap();
+        // Live curve with MORE virtual SOL (price moved up) → fewer tokens out.
+        let live = curve_bytes(1_073_000_000_000_000, 60_000_000_000, 793_100_000_000_000, 30_000_000_000, creator);
+        let live_out = m
+            .calculate_output_live(100_000_000, SwapDirection::Buy, Some(&live), 0, 0)
+            .unwrap();
+        assert!(live_out < baked, "live {live_out} should be < baked {baked}");
+        // No live data → baked path.
+        let fallback = m.calculate_output_live(100_000_000, SwapDirection::Buy, None, 0, 0).unwrap();
+        assert_eq!(fallback, baked);
+    }
+
+    #[test]
+    fn live_complete_curve_rejected() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        let m = PumpfunBondingCurveMarket::new(
+            PumpfunBondingCurvePool {
+                mint: Pubkey::default(),
+                bonding_curve: Pubkey::default(),
+                curve: fresh_curve(creator),
+            },
+            "x".into(),
+        );
+        let mut live = curve_bytes(1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000, 0, creator);
+        live[48] = 1; // complete = true
+        assert!(m.calculate_output_live(100_000_000, SwapDirection::Buy, Some(&live), 0, 0).is_err());
     }
 }
