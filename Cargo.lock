@@ -1720,6 +1720,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "meteora-dbc"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "serde",
+ "solana-pubkey 3.0.0",
+ "solroute-core",
+]
+
+[[package]]
 name = "meteora-dlmm"
 version = "0.1.0"
 dependencies = [
@@ -4411,6 +4421,7 @@ dependencies = [
  "futures",
  "indicatif 0.17.11",
  "meteora-damm",
+ "meteora-dbc",
  "meteora-dlmm",
  "orca-whirlpool",
  "pumpfun-amm",

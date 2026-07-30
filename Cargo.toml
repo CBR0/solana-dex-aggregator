@@ -14,6 +14,7 @@ members = [
     "crates/pumpfun-amm",
     "crates/orca-whirlpool",
     "crates/bonk",
+    "crates/meteora-dbc",
     "crates/aggregator",
     "crates/engine",
     "crates/executor",
