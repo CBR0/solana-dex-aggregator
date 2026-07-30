@@ -23,6 +23,7 @@ use meteora_damm::{
     MeteoraDAMMV2Pool, METEORA_DYNAMIC_AMM, METEORA_DYNAMIC_AMM_V2,
 };
 use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
+use bonk::{parse_pool_state as parse_bonk_pool, BONK_LAUNCHPAD_PROGRAM};
 use pumpfun_amm::{
     derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurvePool,
     PUMPFUN_AMM_PROGRAM,
@@ -56,7 +57,7 @@ struct DexDescriptor {
     discriminator: Option<[u8; 8]>,
 }
 
-const DESCRIPTORS: [DexDescriptor; 7] = [
+const DESCRIPTORS: [DexDescriptor; 8] = [
     DexDescriptor {
         name: "Raydium AMM V4",
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
@@ -99,6 +100,14 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         data_sizes: &[WHIRLPOOL_LEN],
         discriminator: Some(DISC_WHIRLPOOL),
     },
+    // bonk.fun / Raydium LaunchLab. PoolState shares CLMM's discriminator but
+    // lives under a different program — disc-only (sizes vary by curve type).
+    DexDescriptor {
+        name: "Bonk",
+        program_id: BONK_LAUNCHPAD_PROGRAM,
+        data_sizes: &[],
+        discriminator: Some(DISC_POOL_STATE),
+    },
 ];
 
 pub struct PoolLoader {
@@ -128,7 +137,7 @@ impl PoolLoader {
     ) -> Result<PoolIndex, GenericError> {
         let mut index = PoolIndex::new();
 
-        let (r0, r1, r2, r3, r4, r5, r6) = tokio::join!(
+        let (r0, r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
             self.load_dex(&DESCRIPTORS[0], progress_cb),
             self.load_dex(&DESCRIPTORS[1], progress_cb),
             self.load_dex(&DESCRIPTORS[2], progress_cb),
@@ -136,9 +145,10 @@ impl PoolLoader {
             self.load_dex(&DESCRIPTORS[4], progress_cb),
             self.load_dex(&DESCRIPTORS[5], progress_cb),
             self.load_dex(&DESCRIPTORS[6], progress_cb),
+            self.load_dex(&DESCRIPTORS[7], progress_cb),
         );
 
-        for result in [r0, r1, r2, r3, r4, r5, r6] {
+        for result in [r0, r1, r2, r3, r4, r5, r6, r7] {
             if let Ok(pools) = result {
                 for (addr, entry) in pools {
                     let _ = index.add_pool(addr, entry);
@@ -269,6 +279,7 @@ impl PoolLoader {
             "Meteora DLMM" => self.build_meteora_dlmm(raw_accounts, cb).await,
             "Pumpfun AMM" => self.build_pumpfun(raw_accounts, cb).await,
             "Orca Whirlpool" => self.build_orca_whirlpool(raw_accounts, cb).await,
+            "Bonk" => self.build_bonk(raw_accounts, cb).await,
             _ => Err(format!("Unknown DEX: {}", desc.name).into()),
         }
     }
@@ -382,6 +393,27 @@ impl PoolLoader {
         for (i, (pubkey, account)) in accounts.iter().enumerate() {
             if let Ok(pool) = deser_anchor::<PumpfunAmmPool>(&account.data) {
                 entries.push(CachedPool::PumpfunAmm { addr: pubkey.to_string(), pool }.into_pool_entry());
+            }
+            if (i + 1) % 5000 == 0 || i + 1 == total {
+                cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn build_bonk(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Bonk";
+        let total = accounts.len();
+        let mut entries = Vec::new();
+        for (i, (pubkey, account)) in accounts.iter().enumerate() {
+            if let Some(pool) = parse_bonk_pool(&account.data) {
+                // Only fundraising (on-curve) pools are tradeable here; migrated
+                // ones live on the AMM.
+                if pool.status == bonk::POOL_STATUS_FUND {
+                    entries.push(
+                        CachedPool::Bonk { addr: pubkey.to_string(), pool }.into_pool_entry(),
+                    );
+                }
             }
             if (i + 1) % 5000 == 0 || i + 1 == total {
                 cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));

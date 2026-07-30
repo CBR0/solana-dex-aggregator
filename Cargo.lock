@@ -300,6 +300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bonk"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "serde",
+ "solana-pubkey 3.0.0",
+ "solroute-core",
+]
+
+[[package]]
 name = "borsh"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4396,6 +4406,7 @@ name = "solroute-aggregator"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bonk",
  "borsh",
  "futures",
  "indicatif 0.17.11",

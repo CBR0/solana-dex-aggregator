@@ -15,6 +15,7 @@ use solroute_core::{GenericError, Market};
 
 use meteora_damm::{MeteoraDAMMMarket, MeteoraDAMMPool, MeteoraDAMMV2Market, MeteoraDAMMV2Pool};
 use meteora_dlmm::{MeteoraDlmmMarket, MeteoraDLMMPool};
+use bonk::{BonkMarket, BonkPoolState};
 use pumpfun_amm::{
     PumpfunAmmMarket, PumpfunAmmPool, PumpfunBondingCurveMarket, PumpfunBondingCurvePool,
 };
@@ -41,6 +42,7 @@ pub enum CachedPool {
     // order, so a new variant must go at the end to keep existing pools.cache
     // (Orca = index 6) decodable.
     PumpfunBondingCurve { addr: String, pool: PumpfunBondingCurvePool },
+    Bonk { addr: String, pool: BonkPoolState },
 }
 
 impl CachedPool {
@@ -103,6 +105,13 @@ impl CachedPool {
                 }).unwrap_or_default();
                 let market = PumpfunBondingCurveMarket::new(pool, addr.clone());
                 make_entry(addr, "Pumpfun BC", market, cached)
+            }
+            Self::Bonk { addr, pool } => {
+                let cached = bincode::serialize(&Self::Bonk {
+                    addr: addr.clone(), pool: pool.clone(),
+                }).unwrap_or_default();
+                let market = BonkMarket::new(pool, addr.clone());
+                make_entry(addr, "Bonk", market, cached)
             }
             Self::OrcaWhirlpool { addr, pool, a_bal, b_bal } => {
                 let cached = bincode::serialize(&Self::OrcaWhirlpool {
