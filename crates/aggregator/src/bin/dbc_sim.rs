@@ -30,8 +30,15 @@ async fn main() {
     let base_mint = pool.base_mint;
     let (base_vault, quote_vault, config, quote_mint) = (pool.base_vault, pool.quote_vault, pool.config, cfg.quote_mint);
 
+    // Clock for the fee scheduler.
+    let slot = rpc.get_slot().await.unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let current_point = if cfg.activation_type == 1 { now } else { slot };
+
     let amount_in = 50_000_000u64; // 0.05 SOL
-    let m = DbcMarket::new(pool, cfg, pool_addr.to_string());
+    println!("  base_fee_mode {}  cliff {}  period_freq {}  current_point {}",
+        cfg.pool_fees.base_fee.base_fee_mode, cfg.pool_fees.base_fee.cliff_fee_numerator, cfg.pool_fees.base_fee.second_factor, current_point);
+    let m = DbcMarket::new(pool, cfg, pool_addr.to_string()).with_current_point(current_point);
     println!("pool {pool_addr}  base_mint {base_mint}  tradeable {}", meteora_dbc::quote::is_tradeable(&m.pool, &m.config));
     let quote = m.calculate_output(amount_in, SwapDirection::Buy).expect("quote");
     let min_out = quote * 98 / 100;

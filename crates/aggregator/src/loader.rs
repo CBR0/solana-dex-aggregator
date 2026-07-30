@@ -465,14 +465,21 @@ impl PoolLoader {
                 }
             }
         }
+        // Clock for the fee scheduler: slot for activation_type Slot(0), unix
+        // time for Timestamp(1).
+        let current_slot = self.rpc.get_slot().await.unwrap_or(0);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         // Keep only on-curve tradeable pools (needs the config's migration threshold).
         let mut entries = Vec::new();
         for (addr, pool) in pools {
             if let Some(config) = configs.get(&pool.config) {
                 if dbc_tradeable(&pool, config) {
-                    entries.push(
-                        CachedPool::MeteoraDBC { addr, pool, config: config.clone() }.into_pool_entry(),
-                    );
+                    let current_point = if config.activation_type == 1 { now_unix } else { current_slot };
+                    entries.push(crate::cache::dbc_pool_entry(addr, pool, config.clone(), current_point));
                 }
             }
         }

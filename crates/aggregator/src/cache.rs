@@ -135,6 +135,22 @@ impl CachedPool {
     }
 }
 
+/// Build a DBC PoolEntry with a known `current_point` (slot/time) so the fee
+/// scheduler is accurate at load. The cache-reload path (`into_pool_entry`) has
+/// no clock, so it falls back to the cliff (max) fee.
+pub fn dbc_pool_entry(
+    addr: String,
+    pool: DbcVirtualPool,
+    config: DbcConfig,
+    current_point: u64,
+) -> (String, PoolEntry) {
+    let cached = bincode::serialize(&CachedPool::MeteoraDBC {
+        addr: addr.clone(), pool: pool.clone(), config: config.clone(),
+    }).unwrap_or_default();
+    let market = DbcMarket::new(pool, config, addr.clone()).with_current_point(current_point);
+    make_entry(addr, "Meteora DBC", market, cached)
+}
+
 /// Build a PoolEntry, resolving quote/base mints from market metadata once.
 fn make_entry(
     addr: String,

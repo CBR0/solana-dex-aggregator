@@ -201,12 +201,65 @@ fn variable_fee_numerator(pool: &VirtualPool, config: &PoolConfig) -> u64 {
     }
 }
 
-/// Total trading fee numerator (base + variable, capped). NOTE: base fee uses the
-/// flat `cliff_fee_numerator`; time-decayed fee schedulers and the size-dependent
-/// rate limiter (`base_fee_mode == 2`) are not modeled yet — those pools quote
-/// with the cliff (max) fee, a conservative slight under-estimate of output.
-fn total_fee_numerator(pool: &VirtualPool, config: &PoolConfig) -> u64 {
-    let base = config.pool_fees.base_fee.cliff_fee_numerator;
+const ONE_Q64: u128 = 1u128 << 64;
+
+/// Q64.64 exponentiation, `base^exp`. Valid only for `base <= ONE_Q64` (the fee
+/// scheduler's `1 - reduction/10000` is always < 1), which keeps every product
+/// within u128 — no widening needed.
+fn pow_q64(base: u128, exp: u32) -> u128 {
+    let mut result = ONE_Q64;
+    let mut b = base;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = result.saturating_mul(b) >> 64;
+        }
+        b = b.saturating_mul(b) >> 64;
+        e >>= 1;
+    }
+    result
+}
+
+/// Exponential fee scheduler: `cliff * (1 - reduction/10000)^period`.
+fn get_fee_in_period(cliff: u64, reduction_factor: u64, period: u16) -> u64 {
+    if period == 0 {
+        return cliff;
+    }
+    let bps = ((reduction_factor as u128) << 64) / 10_000;
+    let base = ONE_Q64.saturating_sub(bps);
+    let factor = pow_q64(base, period as u32);
+    ((factor.saturating_mul(cliff as u128)) >> 64) as u64
+}
+
+/// Base fee numerator, honoring the fee scheduler (`base_fee_mode` 0=Linear,
+/// 1=Exponential). `current_point` is the slot or unix time per
+/// `config.activation_type`; 0 = unknown → fall back to the cliff (max) fee.
+/// The size-dependent rate limiter (mode 2) is not modeled — those pools quote at
+/// the cliff, a conservative slight under-estimate of output.
+fn base_fee_numerator(config: &PoolConfig, pool: &VirtualPool, current_point: u64) -> u64 {
+    let bf = &config.pool_fees.base_fee;
+    let cliff = bf.cliff_fee_numerator;
+    match bf.base_fee_mode {
+        0 | 1 => {
+            let period_frequency = bf.second_factor;
+            let number_of_period = bf.first_factor as u64;
+            if period_frequency == 0 || current_point == 0 || current_point < pool.activation_point {
+                return cliff;
+            }
+            let period = ((current_point - pool.activation_point) / period_frequency).min(number_of_period);
+            if bf.base_fee_mode == 0 {
+                cliff.saturating_sub(bf.third_factor.saturating_mul(period))
+            } else {
+                get_fee_in_period(cliff, bf.third_factor, period.min(u16::MAX as u64) as u16)
+            }
+        }
+        _ => cliff,
+    }
+}
+
+/// Total trading fee numerator (base + variable, capped).
+fn total_fee_numerator(pool: &VirtualPool, config: &PoolConfig, current_point: u64) -> u64 {
+    let base = base_fee_numerator(config, pool, current_point);
     let total = base.saturating_add(variable_fee_numerator(pool, config));
     total.min(MAX_FEE_NUMERATOR)
 }
@@ -238,11 +291,12 @@ pub fn quote_exact_in(
     config: &PoolConfig,
     amount_in: u64,
     buy: bool,
+    current_point: u64,
 ) -> Option<u64> {
     if amount_in == 0 || !is_tradeable(pool, config) {
         return None;
     }
-    let fee_num = total_fee_numerator(pool, config);
+    let fee_num = total_fee_numerator(pool, config, current_point);
     let quote_token_mode = config.collect_fee_mode == 0;
 
     let out: u128 = if buy {
@@ -266,8 +320,8 @@ pub fn quote_exact_in(
 }
 
 /// Fee numerator exposed for the `Market` fee metadata (as bps ≈ numerator/1e5).
-pub fn fee_numerator(pool: &VirtualPool, config: &PoolConfig) -> u64 {
-    total_fee_numerator(pool, config)
+pub fn fee_numerator(pool: &VirtualPool, config: &PoolConfig, current_point: u64) -> u64 {
+    total_fee_numerator(pool, config, current_point)
 }
 
 // A minimal borrow of the protocol split, kept for parity/documentation.

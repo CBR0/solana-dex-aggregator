@@ -197,11 +197,19 @@ pub struct DbcMarket {
     pub pool: VirtualPool,
     pub config: PoolConfig,
     pub pool_address: String,
+    /// Slot or unix time (per `config.activation_type`) used by the fee
+    /// scheduler; 0 = unknown → the cliff (max) fee is used.
+    pub current_point: u64,
 }
 
 impl DbcMarket {
     pub fn new(pool: VirtualPool, config: PoolConfig, pool_address: String) -> Self {
-        Self { pool, config, pool_address }
+        Self { pool, config, pool_address, current_point: 0 }
+    }
+
+    pub fn with_current_point(mut self, current_point: u64) -> Self {
+        self.current_point = current_point;
+        self
     }
 
     fn quote_decimals(&self) -> u8 {
@@ -222,7 +230,7 @@ impl Market for DbcMarket {
             base_vault: self.pool.base_vault,
             fees: PoolFees {
                 // numerator/1e9 → bps = numerator/1e5.
-                trade_fee_bps: quote::fee_numerator(&self.pool, &self.config) / 100_000,
+                trade_fee_bps: quote::fee_numerator(&self.pool, &self.config, self.current_point) / 100_000,
                 protocol_fee_bps: None,
             },
         })
@@ -244,7 +252,7 @@ impl Market for DbcMarket {
     ) -> Result<u64, GenericError> {
         // Buy = quote(WSOL) -> base(token); Sell = base -> quote.
         let buy = matches!(direction, SwapDirection::Buy);
-        quote::quote_exact_in(&self.pool, &self.config, amount_in, buy)
+        quote::quote_exact_in(&self.pool, &self.config, amount_in, buy, self.current_point)
             .ok_or_else(|| GenericError::from("dbc quote failed (not tradeable / overflow / zero)"))
     }
 
@@ -260,7 +268,8 @@ impl Market for DbcMarket {
         // config is static so keep the baked copy.
         if let Some(data) = pool_data {
             if let Some(live) = parse_virtual_pool(data) {
-                let m = DbcMarket::new(live, self.config.clone(), self.pool_address.clone());
+                let m = DbcMarket::new(live, self.config.clone(), self.pool_address.clone())
+                    .with_current_point(self.current_point);
                 return m.calculate_output(amount_in, direction);
             }
         }
