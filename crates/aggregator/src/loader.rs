@@ -24,6 +24,10 @@ use meteora_damm::{
 };
 use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
 use bonk::{parse_pool_state as parse_bonk_pool, BONK_LAUNCHPAD_PROGRAM};
+use meteora_dbc::{
+    parse_pool_config as parse_dbc_config, parse_virtual_pool, quote::is_tradeable as dbc_tradeable,
+    DISC_VIRTUAL_POOL, METEORA_DBC_PROGRAM,
+};
 use pumpfun_amm::{
     derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurvePool,
     PUMPFUN_AMM_PROGRAM,
@@ -57,7 +61,7 @@ struct DexDescriptor {
     discriminator: Option<[u8; 8]>,
 }
 
-const DESCRIPTORS: [DexDescriptor; 8] = [
+const DESCRIPTORS: [DexDescriptor; 9] = [
     DexDescriptor {
         name: "Raydium AMM V4",
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
@@ -108,6 +112,14 @@ const DESCRIPTORS: [DexDescriptor; 8] = [
         data_sizes: &[],
         discriminator: Some(DISC_POOL_STATE),
     },
+    // Meteora Dynamic Bonding Curve. VirtualPool is 424 bytes; disc-only filter
+    // (a transfer-hook pool variant shares the size but not the discriminator).
+    DexDescriptor {
+        name: "Meteora DBC",
+        program_id: METEORA_DBC_PROGRAM,
+        data_sizes: &[],
+        discriminator: Some(DISC_VIRTUAL_POOL),
+    },
 ];
 
 pub struct PoolLoader {
@@ -137,7 +149,7 @@ impl PoolLoader {
     ) -> Result<PoolIndex, GenericError> {
         let mut index = PoolIndex::new();
 
-        let (r0, r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
+        let (r0, r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
             self.load_dex(&DESCRIPTORS[0], progress_cb),
             self.load_dex(&DESCRIPTORS[1], progress_cb),
             self.load_dex(&DESCRIPTORS[2], progress_cb),
@@ -146,9 +158,10 @@ impl PoolLoader {
             self.load_dex(&DESCRIPTORS[5], progress_cb),
             self.load_dex(&DESCRIPTORS[6], progress_cb),
             self.load_dex(&DESCRIPTORS[7], progress_cb),
+            self.load_dex(&DESCRIPTORS[8], progress_cb),
         );
 
-        for result in [r0, r1, r2, r3, r4, r5, r6, r7] {
+        for result in [r0, r1, r2, r3, r4, r5, r6, r7, r8] {
             if let Ok(pools) = result {
                 for (addr, entry) in pools {
                     let _ = index.add_pool(addr, entry);
@@ -280,6 +293,7 @@ impl PoolLoader {
             "Pumpfun AMM" => self.build_pumpfun(raw_accounts, cb).await,
             "Orca Whirlpool" => self.build_orca_whirlpool(raw_accounts, cb).await,
             "Bonk" => self.build_bonk(raw_accounts, cb).await,
+            "Meteora DBC" => self.build_dbc(raw_accounts, cb).await,
             _ => Err(format!("Unknown DEX: {}", desc.name).into()),
         }
     }
@@ -419,6 +433,50 @@ impl PoolLoader {
                 cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
             }
         }
+        Ok(entries)
+    }
+
+    async fn build_dbc(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Meteora DBC";
+        // Parse pools, pre-filter migrated (full tradeable check needs the config).
+        let mut pools: Vec<(String, meteora_dbc::VirtualPool)> = Vec::new();
+        for (pubkey, account) in &accounts {
+            if let Some(p) = parse_virtual_pool(&account.data) {
+                if p.is_migrated == 0 && p.migration_progress == 0 {
+                    pools.push((pubkey.to_string(), p));
+                }
+            }
+        }
+        // Configs are shared across many pools — fetch the unique set once.
+        let mut cfg_keys: Vec<Pubkey> = pools.iter().map(|(_, p)| p.config).collect();
+        cfg_keys.sort_unstable_by_key(|k| k.to_bytes());
+        cfg_keys.dedup();
+        cb(progress(dex, LoadPhase::FetchingBalances { done: 0, total: cfg_keys.len() }));
+        let mut configs: std::collections::HashMap<Pubkey, meteora_dbc::PoolConfig> =
+            std::collections::HashMap::new();
+        for chunk in cfg_keys.chunks(BALANCE_BATCH_SIZE) {
+            if let Ok(accs) = self.rpc.get_multiple_accounts(chunk).await {
+                for (k, maybe) in chunk.iter().zip(accs) {
+                    if let Some(a) = maybe.as_ref() {
+                        if let Some(c) = parse_dbc_config(&a.data) {
+                            configs.insert(*k, c);
+                        }
+                    }
+                }
+            }
+        }
+        // Keep only on-curve tradeable pools (needs the config's migration threshold).
+        let mut entries = Vec::new();
+        for (addr, pool) in pools {
+            if let Some(config) = configs.get(&pool.config) {
+                if dbc_tradeable(&pool, config) {
+                    entries.push(
+                        CachedPool::MeteoraDBC { addr, pool, config: config.clone() }.into_pool_entry(),
+                    );
+                }
+            }
+        }
+        cb(progress(dex, LoadPhase::Complete { pool_count: entries.len() }));
         Ok(entries)
     }
 

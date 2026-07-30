@@ -16,6 +16,7 @@ use solroute_core::{GenericError, Market};
 use meteora_damm::{MeteoraDAMMMarket, MeteoraDAMMPool, MeteoraDAMMV2Market, MeteoraDAMMV2Pool};
 use meteora_dlmm::{MeteoraDlmmMarket, MeteoraDLMMPool};
 use bonk::{BonkMarket, BonkPoolState};
+use meteora_dbc::{DbcMarket, PoolConfig as DbcConfig, VirtualPool as DbcVirtualPool};
 use pumpfun_amm::{
     PumpfunAmmMarket, PumpfunAmmPool, PumpfunBondingCurveMarket, PumpfunBondingCurvePool,
 };
@@ -43,6 +44,7 @@ pub enum CachedPool {
     // (Orca = index 6) decodable.
     PumpfunBondingCurve { addr: String, pool: PumpfunBondingCurvePool },
     Bonk { addr: String, pool: BonkPoolState },
+    MeteoraDBC { addr: String, pool: DbcVirtualPool, config: DbcConfig },
 }
 
 impl CachedPool {
@@ -112,6 +114,13 @@ impl CachedPool {
                 }).unwrap_or_default();
                 let market = BonkMarket::new(pool, addr.clone());
                 make_entry(addr, "Bonk", market, cached)
+            }
+            Self::MeteoraDBC { addr, pool, config } => {
+                let cached = bincode::serialize(&Self::MeteoraDBC {
+                    addr: addr.clone(), pool: pool.clone(), config: config.clone(),
+                }).unwrap_or_default();
+                let market = DbcMarket::new(pool, config, addr.clone());
+                make_entry(addr, "Meteora DBC", market, cached)
             }
             Self::OrcaWhirlpool { addr, pool, a_bal, b_bal } => {
                 let cached = bincode::serialize(&Self::OrcaWhirlpool {

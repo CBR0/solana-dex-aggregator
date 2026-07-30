@@ -21,6 +21,7 @@ use solroute_executor::meteora_dlmm::{self, DlmmAccounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
 use solroute_executor::pumpfun_bc::{self, PumpBcAccounts};
+use solroute_executor::meteora_dbc::{self as dbc_exec, DbcAccounts};
 use solroute_executor::raydium_amm_v4;
 use solroute_executor::raydium_clmm;
 use solroute_executor::orca_whirlpool as orca_exec;
@@ -128,6 +129,18 @@ pub async fn build_hop_instructions(
                 creator: pool.curve.creator,
             };
             pumpfun_bc::build_swap(&accounts, &leg, progs[0], opts)
+        }
+        CachedPool::MeteoraDBC { pool, config, .. } => {
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, config.quote_mint]).await;
+            let accounts = DbcAccounts {
+                pool: pool_pubkey,
+                config: pool.config,
+                base_mint: pool.base_mint,
+                quote_mint: config.quote_mint,
+                base_vault: pool.base_vault,
+                quote_vault: pool.quote_vault,
+            };
+            dbc_exec::build_swap(&accounts, &leg, progs[0], progs[1], opts)
         }
         CachedPool::Bonk { .. } => {
             // Routing/quoting works; execution needs the current LaunchLab
