@@ -75,6 +75,15 @@ pub struct BonkPoolState {
     // trailing padding [u64; 8] ignored by `deserialize`
 }
 
+/// Derive a pool's `PoolState` address (`["pool", base_mint, quote_mint]`).
+pub fn derive_pool_pda(base_mint: &Pubkey, quote_mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"pool", base_mint.as_ref(), quote_mint.as_ref()],
+        &Pubkey::from_str_const(BONK_LAUNCHPAD_PROGRAM),
+    )
+    .0
+}
+
 /// Parse a LaunchLab `PoolState` account (data includes the 8-byte disc).
 pub fn parse_pool_state(data: &[u8]) -> Option<BonkPoolState> {
     if data.len() < 8 || data[..8] != DISC_POOL_STATE {

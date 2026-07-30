@@ -21,7 +21,6 @@ use solroute_executor::meteora_dlmm::{self, DlmmAccounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
 use solroute_executor::pumpfun_bc::{self, PumpBcAccounts};
-use solroute_executor::bonk::{self as bonk_exec, BonkAccounts};
 use solroute_executor::raydium_amm_v4;
 use solroute_executor::raydium_clmm;
 use solroute_executor::orca_whirlpool as orca_exec;
@@ -130,18 +129,12 @@ pub async fn build_hop_instructions(
             };
             pumpfun_bc::build_swap(&accounts, &leg, progs[0], opts)
         }
-        CachedPool::Bonk { pool, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await;
-            let accounts = BonkAccounts {
-                pool_state: pool_pubkey,
-                global_config: pool.global_config,
-                platform_config: pool.platform_config,
-                base_mint: pool.base_mint,
-                quote_mint: pool.quote_mint,
-                base_vault: pool.base_vault,
-                quote_vault: pool.quote_vault,
-            };
-            bonk_exec::build_swap(&accounts, &leg, progs[0], progs[1], opts)
+        CachedPool::Bonk { .. } => {
+            // Routing/quoting works; execution needs the current LaunchLab
+            // program's platform + creator fee-vault remaining accounts, whose
+            // derivation isn't yet resolved (see solroute_executor::bonk docs).
+            // The builder itself is complete once those vaults are supplied.
+            Err("bonk execution not yet supported: LaunchLab fee-vault remaining accounts unresolved".into())
         }
         CachedPool::RaydiumV4 { pool, .. } => {
             raydium_amm_v4::build_swap(rpc, &pool, pool_pubkey, &leg, opts).await

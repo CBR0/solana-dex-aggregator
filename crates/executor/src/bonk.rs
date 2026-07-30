@@ -1,11 +1,24 @@
 //! bonk.fun / Raydium LaunchLab `buy_exact_in` / `sell_exact_in` builder.
 //!
-//! Program `LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj`. Account order + args
-//! verified against the launchpad IDL and sol-trade-sdk `instruction/bonk.rs`:
-//! 15 accounts (no remaining accounts), data = disc + amount_in u64 +
-//! minimum_amount_out u64 + share_fee_rate u64 (0). Quote side is WSOL/USDC
+//! Program `LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj`. Data = disc + amount_in
+//! u64 + minimum_amount_out u64 + share_fee_rate u64 (0). Quote side is WSOL/USDC
 //! (an SPL token account), so SOL is wrapped on buy and the WSOL account closed
 //! after — the standard AMM wrap/close flow.
+//!
+//! ⚠️ EXECUTION INCOMPLETE — do not land bonk routes yet. The sol-trade-sdk
+//! reference (and the IDL bundled with it) build a 15-account `buy_exact_in`,
+//! but the CURRENT on-chain program requires **18 accounts** and rejects 15 with
+//! Anchor error 6018 (NotEnoughRemainingAccounts), confirmed by live sim. A real
+//! on-chain buy appends, after the 15 named accounts:
+//!   15 `system_program` (`111…111`)
+//!   16 platform fee vault — a WSOL token account (e.g. owner `56XVRVAs…`, the
+//!      platform fee wallet holding hundreds of SOL)
+//!   17 creator/second fee vault — a WSOL token account (owner `9sHpTfmV…`)
+//! Those two fee-vault owners are NOT present in the pool's `global_config`,
+//! `platform_config`, or `creator`, so the derivation needs the current
+//! LaunchLab IDL (the bundled one is stale). Until that's resolved [`build_swap`]
+//! returns an error so a broken transaction is never produced. Quoting/routing
+//! (the `bonk` crate `Market`) is unaffected and works.
 
 use solana_pubkey::Pubkey;
 use solana_sdk::instruction::{AccountMeta, Instruction};
@@ -21,6 +34,7 @@ pub const AUTHORITY: Pubkey =
     Pubkey::from_str_const("WLHv2UAZm6z4KyaaELi5pjdbJh6RESMva1Rnn8pJVVh");
 pub const EVENT_AUTHORITY: Pubkey =
     Pubkey::from_str_const("2DPAtwB8L12vrMRExbLuyGnC7n2J5LNoZQSejeQGpwkr");
+pub const SYSTEM_PROGRAM: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
 
 pub const BUY_EXACT_IN_DISCRIMINATOR: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
 pub const SELL_EXACT_IN_DISCRIMINATOR: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
@@ -41,11 +55,17 @@ pub struct BonkAccounts {
 ///
 /// `base_token_program` is the base mint's owning program (SPL or Token-2022);
 /// `quote_token_program` is the quote mint's (WSOL/USDC → legacy SPL Token).
+/// `platform_fee_vault` / `creator_fee_vault` are the quote-mint token accounts
+/// the current program requires as trailing accounts (see module docs) — the
+/// caller must supply them (their derivation is the open item).
+#[allow(clippy::too_many_arguments)]
 pub fn build_swap(
     accounts: &BonkAccounts,
     leg: &SwapLeg,
     base_token_program: Pubkey,
     quote_token_program: Pubkey,
+    platform_fee_vault: Pubkey,
+    creator_fee_vault: Pubkey,
     opts: &SwapOptions,
 ) -> Result<Vec<Instruction>, GenericError> {
     if leg.amount_in == 0 {
@@ -102,6 +122,10 @@ pub fn build_swap(
         AccountMeta::new_readonly(quote_token_program, false),      // 12 quote_token_program
         AccountMeta::new_readonly(EVENT_AUTHORITY, false),          // 13 event_authority
         AccountMeta::new_readonly(PROGRAM_ID, false),               // 14 program
+        // Trailing accounts the current on-chain program requires (18 total).
+        AccountMeta::new_readonly(SYSTEM_PROGRAM, false),           // 15 system_program
+        AccountMeta::new(platform_fee_vault, false),                // 16 platform fee vault (WSOL)
+        AccountMeta::new(creator_fee_vault, false),                 // 17 creator/second fee vault (WSOL)
     ];
 
     // data: disc(8) + amount_in u64 + minimum_amount_out u64 + share_fee_rate u64(0)
@@ -148,9 +172,9 @@ mod tests {
     fn buy_layout_and_data() {
         let tp = Pubkey::from_str_const(TOKEN_PROGRAM);
         let leg = SwapLeg { payer: pk(9), input_mint: wsol(), output_mint: pk(4), amount_in: 1_000_000, min_amount_out: 5 };
-        let ixs = build_swap(&accts(), &leg, tp, tp, &opts()).unwrap();
+        let ixs = build_swap(&accts(), &leg, tp, tp, pk(7), pk(8), &opts()).unwrap();
         let ix = ixs.iter().find(|i| i.program_id == PROGRAM_ID).unwrap();
-        assert_eq!(ix.accounts.len(), 15);
+        assert_eq!(ix.accounts.len(), 18);
         assert_eq!(&ix.data[..8], &BUY_EXACT_IN_DISCRIMINATOR);
         assert_eq!(ix.data.len(), 32);
         assert_eq!(u64::from_le_bytes(ix.data[8..16].try_into().unwrap()), 1_000_000);
@@ -158,14 +182,17 @@ mod tests {
         assert_eq!(u64::from_le_bytes(ix.data[24..32].try_into().unwrap()), 0);
         assert!(ix.accounts[0].is_signer);
         assert_eq!(ix.accounts[4].pubkey, pk(1)); // pool_state
+        assert_eq!(ix.accounts[15].pubkey, SYSTEM_PROGRAM);
+        assert_eq!(ix.accounts[16].pubkey, pk(7)); // platform fee vault
+        assert_eq!(ix.accounts[17].pubkey, pk(8)); // creator fee vault
     }
 
     #[test]
     fn sell_uses_sell_disc() {
         let tp = Pubkey::from_str_const(TOKEN_PROGRAM);
         let leg = SwapLeg { payer: pk(9), input_mint: pk(4), output_mint: wsol(), amount_in: 100, min_amount_out: 1 };
-        let ix = build_swap(&accts(), &leg, tp, tp, &opts()).unwrap().into_iter().find(|i| i.program_id == PROGRAM_ID).unwrap();
+        let ix = build_swap(&accts(), &leg, tp, tp, pk(7), pk(8), &opts()).unwrap().into_iter().find(|i| i.program_id == PROGRAM_ID).unwrap();
         assert_eq!(&ix.data[..8], &SELL_EXACT_IN_DISCRIMINATOR);
-        assert_eq!(ix.accounts.len(), 15);
+        assert_eq!(ix.accounts.len(), 18);
     }
 }
