@@ -23,7 +23,10 @@ use meteora_damm::{
     MeteoraDAMMV2Pool, METEORA_DYNAMIC_AMM, METEORA_DYNAMIC_AMM_V2,
 };
 use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
-use pumpfun_amm::{PumpfunAmmPool, PUMPFUN_AMM_PROGRAM};
+use pumpfun_amm::{
+    derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurvePool,
+    PUMPFUN_AMM_PROGRAM,
+};
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
 use orca_whirlpool::{WhirlpoolPool, DISC_WHIRLPOOL, ORCA_WHIRLPOOL_PROGRAM, WHIRLPOOL_LEN};
 use raydium_clmm::{RaydiumCLMMPool, RAYDIUM_CLMM};
@@ -384,6 +387,55 @@ impl PoolLoader {
                 cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
             }
         }
+        Ok(entries)
+    }
+
+    /// Load pump.fun bonding curves for a bounded, explicit set of token mints.
+    ///
+    /// The BondingCurve account carries no base mint and its `["bonding-curve",
+    /// mint]` PDA can't be reversed, so curves cannot be enumerated program-wide
+    /// (and `getProgramAccounts` on the pump program is blocked on stock RPCs).
+    /// This resolves each supplied mint's curve PDA, fetches it via
+    /// `getMultipleAccounts`, parses, and keeps only still-trading curves
+    /// (`complete == false`, non-empty SOL reserves). Production discovery of new
+    /// curves is via pump `create`/trade event streaming.
+    pub async fn load_bonding_curves_for_mints(
+        &self,
+        mints: &[Pubkey],
+        cb: &ProgressCallback,
+    ) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Pumpfun BC";
+        let curves: Vec<Pubkey> = mints.iter().map(derive_bonding_curve_pda).collect();
+        let total = mints.len();
+        cb(progress(dex, LoadPhase::FetchingPools));
+
+        let mut entries = Vec::new();
+        let mut done = 0usize;
+        for (mchunk, cchunk) in mints.chunks(BALANCE_BATCH_SIZE).zip(curves.chunks(BALANCE_BATCH_SIZE)) {
+            let accounts = self.rpc.get_multiple_accounts(cchunk).await.unwrap_or_default();
+            for ((mint, curve), maybe) in mchunk.iter().zip(cchunk).zip(accounts) {
+                if let Some(account) = maybe {
+                    if let Some(bc) = parse_bonding_curve(&account.data) {
+                        // Skip migrated (complete) and dead (empty) curves.
+                        if bc.complete || bc.real_sol_reserves == 0 {
+                            continue;
+                        }
+                        let pool = PumpfunBondingCurvePool {
+                            mint: *mint,
+                            bonding_curve: *curve,
+                            curve: bc,
+                        };
+                        entries.push(
+                            CachedPool::PumpfunBondingCurve { addr: curve.to_string(), pool }
+                                .into_pool_entry(),
+                        );
+                    }
+                }
+            }
+            done += mchunk.len();
+            cb(progress(dex, LoadPhase::BuildingMarkets { done, total }));
+        }
+        cb(progress(dex, LoadPhase::Complete { pool_count: entries.len() }));
         Ok(entries)
     }
 

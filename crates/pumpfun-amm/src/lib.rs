@@ -241,6 +241,20 @@ impl Market for PumpfunAmmMarket {
 /// BondingCurve account Anchor discriminator (`sha256("account:BondingCurve")[..8]`).
 pub const DISC_BONDING_CURVE: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
 
+/// Byte offset of the `complete` flag inside a BondingCurve account's data
+/// (8-byte disc + 5×u64 reserves/supply). Usable as a memcmp filter to select
+/// only non-complete (still-trading) curves at the RPC.
+pub const BONDING_CURVE_COMPLETE_OFFSET: usize = 8 + 5 * 8;
+
+/// Derive a token's bonding-curve account address (`["bonding-curve", mint]`).
+pub fn derive_bonding_curve_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"bonding-curve", mint.as_ref()],
+        &Pubkey::from_str_const(PUMPFUN_PROGRAM),
+    )
+    .0
+}
+
 /// Protocol fee (basis points) on every bonding-curve trade.
 pub const PUMPFUN_BC_FEE_BASIS_POINTS: u64 = 95;
 /// Additional creator fee (basis points) when the curve has a creator.
