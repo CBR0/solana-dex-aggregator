@@ -257,7 +257,9 @@ pub fn derive_bonding_curve_pda(mint: &Pubkey) -> Pubkey {
 
 /// Protocol fee (basis points) on every bonding-curve trade.
 pub const PUMPFUN_BC_FEE_BASIS_POINTS: u64 = 95;
-/// Additional creator fee (basis points) when the curve has a creator.
+/// Additional creator fee (basis points) when the curve has a creator. Total
+/// 95 + 30 = 125 bps for creator coins — **empirically confirmed**: buy quotes
+/// match Jupiter's pump.fun BC route to the unit (+0.0 bps) across live curves.
 pub const PUMPFUN_BC_CREATOR_FEE: u64 = 30;
 
 /// pump.fun mints are always 6 decimals.
