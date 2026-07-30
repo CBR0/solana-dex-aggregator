@@ -1,9 +1,11 @@
 use std::env;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use solana_commitment_config::CommitmentConfig;
+use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use tokio::sync::RwLock;
 
@@ -32,7 +34,7 @@ async fn main() {
     println!("==============");
 
     // 1. Load pools from cache or RPC.
-    let (pool_index, loaded_from_cache) = if cache_path.exists() {
+    let (mut pool_index, loaded_from_cache) = if cache_path.exists() {
         println!("Loading pools from cache: {}", cache_path.display());
         match cache::load_cache(&cache_path) {
             Ok((index, ts)) => {
@@ -56,6 +58,29 @@ async fn main() {
     };
 
     println!("Pool index: {} pools", pool_index.pool_count());
+
+    // 1b. Optional: seed pump.fun bonding curves from a mint watchlist. The
+    //     BondingCurve account has no mint and can't be enumerated, so curves
+    //     are resolved from an explicit `PUMPFUN_BC_MINTS` list (comma-separated).
+    //     Once in the index, the gRPC BC lane keeps their reserves live.
+    if let Ok(env_mints) = env::var("PUMPFUN_BC_MINTS") {
+        let mints: Vec<Pubkey> =
+            env_mints.split(',').filter_map(|s| Pubkey::from_str(s.trim()).ok()).collect();
+        if !mints.is_empty() {
+            let loader = PoolLoader::new(&rpc_url);
+            let cb: solroute_aggregator::loader::ProgressCallback = Box::new(|_| {});
+            match loader.load_bonding_curves_for_mints(&mints, &cb).await {
+                Ok(curves) => {
+                    let n = curves.len();
+                    for (addr, entry) in curves {
+                        let _ = pool_index.add_pool(addr, entry);
+                    }
+                    println!("Seeded {n}/{} pump.fun bonding curves (live, non-complete)", mints.len());
+                }
+                Err(e) => eprintln!("pump BC seed failed: {e}"),
+            }
+        }
+    }
 
     // 2. Build PoolRegistry and validate immediately from cached vault balances.
     //    No RPC needed — the market objects already have balances from the cache.

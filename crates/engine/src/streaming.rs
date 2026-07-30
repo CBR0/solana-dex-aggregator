@@ -125,6 +125,54 @@ fn vault_list_filters(
     filters
 }
 
+/// BondingCurve account discriminator (`sha256("account:BondingCurve")[..8]`).
+const DISC_BONDING_CURVE: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
+
+/// Explicit account-list filters for the pump.fun bonding curves currently in
+/// the registry. A broad owner+disc lane on the pump program would firehose the
+/// whole chain's pump trades and starve the subscription (see the token-firehose
+/// note on `ACCOUNT_SUBS`); this streams only the curves we actually route.
+/// Reserves change on every trade, so keeping them live is what makes BC quotes
+/// current. The BondingCurve-disc memcmp is the required non-empty per-lane
+/// filter — curve account sizes vary (49 legacy / 151 current), so `dataSize`
+/// can't be used.
+fn bonding_curve_list_filters(
+    registry: &PoolRegistry,
+) -> HashMap<String, SubscribeRequestFilterAccounts> {
+    let mut keys: Vec<String> = registry
+        .iter_pools()
+        .filter(|(_, info)| info.dex_name == "Pumpfun BC")
+        .map(|(addr, _)| addr.to_string())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    let mut filters = HashMap::new();
+    for (i, chunk) in keys.chunks(VAULT_LIST_CHUNK).enumerate() {
+        filters.insert(
+            format!("pumpfun_bc_list_{i}"),
+            SubscribeRequestFilterAccounts {
+                account: chunk.to_vec(),
+                owner: vec![],
+                filters: vec![SubscribeRequestFilterAccountsFilter {
+                    filter: Some(subscribe_request_filter_accounts_filter::Filter::Memcmp(
+                        SubscribeRequestFilterAccountsFilterMemcmp {
+                            offset: 0,
+                            data: Some(
+                                subscribe_request_filter_accounts_filter_memcmp::Data::Bytes(
+                                    DISC_BONDING_CURVE.to_vec(),
+                                ),
+                            ),
+                        },
+                    )),
+                }],
+                ..Default::default()
+            },
+        );
+    }
+    filters
+}
+
 const STATS_INTERVAL: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
@@ -274,6 +322,14 @@ async fn run_stream(
         let key_count: usize = vault_filters.values().map(|f| f.account.len()).sum();
         eprintln!("gRPC vault list: {key_count} accounts across {lanes} lanes");
         account_filters.extend(vault_filters);
+
+        // pump.fun bonding curves currently routed — keep their reserves live.
+        let bc_filters = bonding_curve_list_filters(&reg);
+        if !bc_filters.is_empty() {
+            let bc_keys: usize = bc_filters.values().map(|f| f.account.len()).sum();
+            eprintln!("gRPC pump BC list: {bc_keys} curves across {} lanes", bc_filters.len());
+            account_filters.extend(bc_filters);
+        }
     }
 
     let request = SubscribeRequest {
