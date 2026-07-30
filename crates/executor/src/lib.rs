@@ -14,6 +14,7 @@ pub mod ata;
 pub mod meteora_dlmm;
 pub mod meteora_damm_v1;
 pub mod meteora_damm_v2;
+pub mod meteora_dbc;
 pub mod pumpswap;
 pub mod pumpfun_bc;
 pub mod bonk;
