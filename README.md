@@ -1,10 +1,10 @@
 # solroute
 
 A Rust DEX **routing + execution** engine for Solana. Loads pools across 7 DEX
-protocols **plus the pump.fun bonding curve** (pre-graduation), finds optimal
-multi-hop swap routes with live on-chain pricing, and builds/simulates/lands the
-resulting swaps as versioned transactions — all without external routing or
-price APIs.
+protocols **plus two pre-graduation bonding curves** (pump.fun and bonk.fun /
+Raydium LaunchLab), finds optimal multi-hop swap routes with live on-chain
+pricing, and builds/simulates/lands the resulting swaps as versioned
+transactions — all without external routing or price APIs.
 
 Every quote is computed from raw on-chain account bytes using each protocol's
 own swap math. No third-party quote API, no price oracle.
@@ -99,6 +99,14 @@ DAMM V1 depeg remaining-accounts, one stale hot-vault), not quoting errors.
 | Pumpfun AMM (PumpSwap) | ✅ | ✅ | bonding-curve AMM |
 | Orca Whirlpools | ✅ | ✅ | official `orca_whirlpools_core` |
 | pump.fun bonding curve (pre-bond) | ✅ | ✅ | virtual-reserve CP + 95/30 fee (=Jupiter +0.0 bps) |
+| bonk.fun / Raydium LaunchLab (pre-bond) | ✅ | ⚠️¹ | virtual+real CP + 125 bps (sim-bounded ≤2%) |
+
+¹ bonk routing/quoting is verified live (1.27M pools enumerable; a buy sim PASSes
+and bounds the quote within 2% of the program's actual output). The executor's
+18-account layout is also sim-verified, but production execution still needs the
+current LaunchLab program's two fee-vault remaining accounts derived
+programmatically (they work when observed from a recent on-chain buy). See
+`crates/executor/src/bonk.rs`.
 
 Concentrated/bin/vault swaps (CLMM/Whirlpool tick arrays, DLMM bin arrays, DAMM
 V1 dynamic vaults) build their variable account sets from pool state; CLMM/DLMM
@@ -319,8 +327,8 @@ cargo build --release --bin solroute-engine       # Engine
   it does not yet split a single trade across multiple pools (the technique
   large aggregators use to cut slippage on big sizes). This is why very large
   swaps can lose bps to Jupiter even when the per-pool math is exact.
-- **8 venues.** Missing e.g. Raydium CPMM, bonk.fun / Raydium LaunchLab, Meteora
-  DBC, Lifinity, Phoenix, OpenBook — each new venue is a new `Market` crate.
+- **9 venues.** Missing e.g. Raydium CPMM, Meteora DBC, Lifinity, Phoenix,
+  OpenBook — each new venue is a new `Market` crate.
 - **pump.fun BC ingestion is mint-driven.** The BondingCurve account carries no
   base mint and its PDA can't be reversed, so curves can't be enumerated via
   `getProgramAccounts` (also blocked on stock RPCs). solroute resolves curves
