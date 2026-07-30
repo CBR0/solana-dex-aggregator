@@ -10,6 +10,11 @@
 use borsh::BorshDeserialize;
 use solana_pubkey::Pubkey;
 
+use solroute_core::{
+    GenericError, Market, PoolFees, PoolFinancials, PoolMetadata, SwapDirection,
+    calculate_price_impact_bps,
+};
+
 pub mod quote;
 
 pub const METEORA_DBC_PROGRAM: &str = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
@@ -184,6 +189,113 @@ pub fn parse_pool_config(data: &[u8]) -> Option<PoolConfig> {
         return None;
     }
     PoolConfig::deserialize(&mut &data[8..]).ok()
+}
+
+/// A DBC pool bundled with its config (quoting needs both). `config` is static
+/// per pool; `pool` carries the live sqrt_price/reserves.
+pub struct DbcMarket {
+    pub pool: VirtualPool,
+    pub config: PoolConfig,
+    pub pool_address: String,
+}
+
+impl DbcMarket {
+    pub fn new(pool: VirtualPool, config: PoolConfig, pool_address: String) -> Self {
+        Self { pool, config, pool_address }
+    }
+
+    fn quote_decimals(&self) -> u8 {
+        // WSOL = 9; otherwise fall back to the config's token decimal is base-side,
+        // so default quote to 9 (SOL) — USDC-quoted DBC pools are rare here.
+        9
+    }
+}
+
+impl Market for DbcMarket {
+    fn metadata(&self) -> Result<PoolMetadata, GenericError> {
+        Ok(PoolMetadata {
+            address: self.pool_address.clone(),
+            dex_name: "Meteora DBC".to_string(),
+            quote_mint: self.config.quote_mint,
+            base_mint: self.pool.base_mint,
+            quote_vault: self.pool.quote_vault,
+            base_vault: self.pool.base_vault,
+            fees: PoolFees {
+                // numerator/1e9 → bps = numerator/1e5.
+                trade_fee_bps: quote::fee_numerator(&self.pool, &self.config) / 100_000,
+                protocol_fee_bps: None,
+            },
+        })
+    }
+
+    fn financials(&self) -> Result<PoolFinancials, GenericError> {
+        Ok(PoolFinancials {
+            quote_balance: self.pool.quote_reserve,
+            base_balance: self.pool.base_reserve,
+            quote_decimals: self.quote_decimals(),
+            base_decimals: self.config.token_decimal,
+        })
+    }
+
+    fn calculate_output(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+    ) -> Result<u64, GenericError> {
+        // Buy = quote(WSOL) -> base(token); Sell = base -> quote.
+        let buy = matches!(direction, SwapDirection::Buy);
+        quote::quote_exact_in(&self.pool, &self.config, amount_in, buy)
+            .ok_or_else(|| GenericError::from("dbc quote failed (not tradeable / overflow / zero)"))
+    }
+
+    fn calculate_output_live(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        _quote_vault_balance: u64,
+        _base_vault_balance: u64,
+    ) -> Result<u64, GenericError> {
+        // Re-parse live VirtualPool (sqrt_price/reserves change per trade); the
+        // config is static so keep the baked copy.
+        if let Some(data) = pool_data {
+            if let Some(live) = parse_virtual_pool(data) {
+                let m = DbcMarket::new(live, self.config.clone(), self.pool_address.clone());
+                return m.calculate_output(amount_in, direction);
+            }
+        }
+        self.calculate_output(amount_in, direction)
+    }
+
+    fn calculate_price_impact(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+    ) -> Result<u64, GenericError> {
+        let pre = self.current_price()?;
+        let out = self.calculate_output(amount_in, direction)? as f64;
+        // Approximate post price from executed rate.
+        let post = match direction {
+            SwapDirection::Buy => {
+                let base_dec = 10f64.powi(self.config.token_decimal as i32);
+                let quote_dec = 10f64.powi(self.quote_decimals() as i32);
+                (amount_in as f64 / quote_dec) / (out / base_dec)
+            }
+            SwapDirection::Sell => {
+                let base_dec = 10f64.powi(self.config.token_decimal as i32);
+                let quote_dec = 10f64.powi(self.quote_decimals() as i32);
+                (out / quote_dec) / (amount_in as f64 / base_dec)
+            }
+        };
+        Ok(calculate_price_impact_bps(pre, post))
+    }
+
+    fn current_price(&self) -> Result<f64, GenericError> {
+        // price(quote per base, raw) = (sqrt_price / 2^64)^2 ; decimal-adjust to UI.
+        let sp = self.pool.sqrt_price as f64 / 2f64.powi(64);
+        let raw = sp * sp;
+        Ok(raw * 10f64.powi(self.config.token_decimal as i32 - self.quote_decimals() as i32))
+    }
 }
 
 #[cfg(test)]

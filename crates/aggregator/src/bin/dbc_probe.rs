@@ -10,7 +10,8 @@ use std::str::FromStr;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 
-use meteora_dbc::{parse_pool_config, parse_virtual_pool};
+use meteora_dbc::{parse_pool_config, parse_virtual_pool, DbcMarket};
+use solroute_core::{Market, SwapDirection};
 
 #[tokio::main]
 async fn main() {
@@ -37,6 +38,15 @@ async fn main() {
             cfg.pool_fees.base_fee.cliff_fee_numerator, cfg.pool_fees.base_fee.base_fee_mode, cfg.pool_fees.dynamic_fee.initialized);
         for (i, c) in active.iter().take(4).enumerate() {
             println!("    curve[{i}] sqrt_price {} liquidity {}", c.sqrt_price, c.liquidity);
+        }
+        let m = DbcMarket::new(pool, cfg, addr.to_string());
+        let tradeable = meteora_dbc::quote::is_tradeable(&m.pool, &m.config);
+        println!("  tradeable {tradeable}  price {:.6e}", m.current_price().unwrap_or(0.0));
+        if tradeable {
+            match m.calculate_output(100_000_000, SwapDirection::Buy) {
+                Ok(o) => println!("  BUY 0.1 SOL -> {o} base ({:.4} tokens)", o as f64 / 10f64.powi(m.config.token_decimal as i32)),
+                Err(e) => println!("  BUY err: {e}"),
+            }
         }
         println!();
     }

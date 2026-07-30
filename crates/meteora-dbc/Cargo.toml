@@ -8,3 +8,4 @@ solroute-core = { path = "../core" }
 solana-pubkey = { workspace = true }
 borsh = { workspace = true }
 serde = { workspace = true }
+uint = "0.10"
