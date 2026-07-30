@@ -13,6 +13,7 @@ members = [
     "crates/meteora-dlmm",
     "crates/pumpfun-amm",
     "crates/orca-whirlpool",
+    "crates/bonk",
     "crates/aggregator",
     "crates/engine",
     "crates/executor",
