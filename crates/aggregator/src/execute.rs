@@ -20,6 +20,7 @@ use solroute_executor::meteora_damm_v1::{self, DammV1Accounts};
 use solroute_executor::meteora_dlmm::{self, DlmmAccounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
+use solroute_executor::pumpfun_bc::{self, PumpBcAccounts};
 use solroute_executor::raydium_amm_v4;
 use solroute_executor::raydium_clmm;
 use solroute_executor::orca_whirlpool as orca_exec;
@@ -117,6 +118,16 @@ pub async fn build_hop_instructions(
                 is_mayhem: false,
             };
             pumpswap::build_swap(&accounts, &leg, opts)
+        }
+        CachedPool::PumpfunBondingCurve { pool, .. } => {
+            // Only the token side has a mint account; SOL settles natively.
+            let progs = resolve_token_programs(rpc, &[pool.mint]).await;
+            let accounts = PumpBcAccounts {
+                mint: pool.mint,
+                bonding_curve: pool.bonding_curve,
+                creator: pool.curve.creator,
+            };
+            pumpfun_bc::build_swap(&accounts, &leg, progs[0], opts)
         }
         CachedPool::RaydiumV4 { pool, .. } => {
             raydium_amm_v4::build_swap(rpc, &pool, pool_pubkey, &leg, opts).await

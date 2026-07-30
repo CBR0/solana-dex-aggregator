@@ -15,7 +15,9 @@ use solroute_core::{GenericError, Market};
 
 use meteora_damm::{MeteoraDAMMMarket, MeteoraDAMMPool, MeteoraDAMMV2Market, MeteoraDAMMV2Pool};
 use meteora_dlmm::{MeteoraDlmmMarket, MeteoraDLMMPool};
-use pumpfun_amm::{PumpfunAmmMarket, PumpfunAmmPool};
+use pumpfun_amm::{
+    PumpfunAmmMarket, PumpfunAmmPool, PumpfunBondingCurveMarket, PumpfunBondingCurvePool,
+};
 use raydium_amm_v4::{RaydiumAmmV4Market, RaydiumAMMV4};
 use orca_whirlpool::{OrcaWhirlpoolMarket, WhirlpoolPool};
 use raydium_clmm::{RaydiumClmmMarket, RaydiumCLMMPool};
@@ -35,6 +37,10 @@ pub enum CachedPool {
     MeteoraDLMM { addr: String, pool: MeteoraDLMMPool, rx_bal: u64, ry_bal: u64 },
     PumpfunAmm { addr: String, pool: PumpfunAmmPool },
     OrcaWhirlpool { addr: String, pool: WhirlpoolPool, a_bal: u64, b_bal: u64 },
+    // Appended last on purpose: bincode encodes enum variants by declaration
+    // order, so a new variant must go at the end to keep existing pools.cache
+    // (Orca = index 6) decodable.
+    PumpfunBondingCurve { addr: String, pool: PumpfunBondingCurvePool },
 }
 
 impl CachedPool {
@@ -90,6 +96,13 @@ impl CachedPool {
                 }).unwrap_or_default();
                 let market = PumpfunAmmMarket::new(pool, addr.clone());
                 make_entry(addr, "Pumpfun AMM", market, cached)
+            }
+            Self::PumpfunBondingCurve { addr, pool } => {
+                let cached = bincode::serialize(&Self::PumpfunBondingCurve {
+                    addr: addr.clone(), pool: pool.clone(),
+                }).unwrap_or_default();
+                let market = PumpfunBondingCurveMarket::new(pool, addr.clone());
+                make_entry(addr, "Pumpfun BC", market, cached)
             }
             Self::OrcaWhirlpool { addr, pool, a_bal, b_bal } => {
                 let cached = bincode::serialize(&Self::OrcaWhirlpool {
