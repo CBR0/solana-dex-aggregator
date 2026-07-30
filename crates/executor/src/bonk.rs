@@ -5,20 +5,17 @@
 //! (an SPL token account), so SOL is wrapped on buy and the WSOL account closed
 //! after — the standard AMM wrap/close flow.
 //!
-//! ⚠️ EXECUTION INCOMPLETE — do not land bonk routes yet. The sol-trade-sdk
-//! reference (and the IDL bundled with it) build a 15-account `buy_exact_in`,
-//! but the CURRENT on-chain program requires **18 accounts** and rejects 15 with
-//! Anchor error 6018 (NotEnoughRemainingAccounts), confirmed by live sim. A real
-//! on-chain buy appends, after the 15 named accounts:
+//! **18 accounts** (verified by live sim). The sol-trade-sdk reference and both
+//! the bundled and current on-chain IDLs define only 15; the extra 3 are dynamic
+//! `remaining_accounts` the program appends for fee distribution:
 //!   15 `system_program` (`111…111`)
-//!   16 platform fee vault — a WSOL token account (e.g. owner `56XVRVAs…`, the
-//!      platform fee wallet holding hundreds of SOL)
-//!   17 creator/second fee vault — a WSOL token account (owner `9sHpTfmV…`)
-//! Those two fee-vault owners are NOT present in the pool's `global_config`,
-//! `platform_config`, or `creator`, so the derivation needs the current
-//! LaunchLab IDL (the bundled one is stale). Until that's resolved [`build_swap`]
-//! returns an error so a broken transaction is never produced. Quoting/routing
-//! (the `bonk` crate `Market`) is unaffected and works.
+//!   16 platform fee vault — a WSOL token account (per platform_config)
+//!   17 creator/second fee vault — a WSOL token account (per pool)
+//! Their owners aren't in the pool's `global_config`/`platform_config`/`creator`
+//! and they aren't the WSOL ATAs of the fee wallets, so they're not derivable
+//! from public account data. The aggregator resolves them at execution time by
+//! observing accounts 16/17 from a recent swap on the pool
+//! (`execute::observe_bonk_fee_vaults`); this builder takes them as parameters.
 
 use solana_pubkey::Pubkey;
 use solana_sdk::instruction::{AccountMeta, Instruction};

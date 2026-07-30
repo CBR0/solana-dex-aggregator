@@ -99,15 +99,14 @@ DAMM V1 depeg remaining-accounts, one stale hot-vault), not quoting errors.
 | Pumpfun AMM (PumpSwap) | ✅ | ✅ | bonding-curve AMM |
 | Orca Whirlpools | ✅ | ✅ | official `orca_whirlpools_core` |
 | pump.fun bonding curve (pre-bond) | ✅ | ✅ | virtual-reserve CP + 95/30 fee (=Jupiter +0.0 bps) |
-| bonk.fun / Raydium LaunchLab (pre-bond) | ✅ | ⚠️¹ | virtual+real CP + 125 bps (sim-bounded ≤2%) |
-| Meteora DBC (pre-bond) | ✅ | ✅ | sqrt-price curve ladder + dynamic fee (sim-verified <0.1%) |
+| bonk.fun / Raydium LaunchLab (pre-bond) | ✅ | ✅¹ | virtual+real CP + 125 bps (sim-bounded ≤2%) |
+| Meteora DBC (pre-bond) | ✅ | ✅ | sqrt-price curve + fee scheduler + dynamic fee (sim-verified <0.1%) |
 
-¹ bonk routing/quoting is verified live (1.27M pools enumerable; a buy sim PASSes
-and bounds the quote within 2% of the program's actual output). The executor's
-18-account layout is also sim-verified, but production execution still needs the
-current LaunchLab program's two fee-vault remaining accounts derived
-programmatically (they work when observed from a recent on-chain buy). See
-`crates/executor/src/bonk.rs`.
+¹ bonk routing/quoting is verified live (1.27M pools enumerable; buy sim PASSes,
+bounding the quote within 2% of actual). Execution: the current LaunchLab program
+needs two fee-vault remaining accounts that aren't derivable from public account
+data — the aggregator observes them from a recent swap on the pool at execution
+time (`execute::observe_bonk_fee_vaults`). Buy sim PASSes end-to-end.
 
 Concentrated/bin/vault swaps (CLMM/Whirlpool tick arrays, DLMM bin arrays, DAMM
 V1 dynamic vaults) build their variable account sets from pool state; CLMM/DLMM
