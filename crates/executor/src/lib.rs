@@ -16,6 +16,7 @@ pub mod meteora_damm_v1;
 pub mod meteora_damm_v2;
 pub mod pumpswap;
 pub mod pumpfun_bc;
+pub mod bonk;
 pub mod orca_whirlpool;
 pub mod raydium_clmm;
 pub mod raydium_amm_v4;
