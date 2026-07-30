@@ -27,8 +27,16 @@ async fn main() {
     let rpc = RpcClient::new(std::env::var("RPC_URL").expect("set RPC_URL"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let pool_addr = Pubkey::from_str(&args[0]).expect("pool addr");
-    let platform_fee_vault = Pubkey::from_str(&args[1]).expect("platform_fee_vault (buy tx acct 16)");
-    let creator_fee_vault = Pubkey::from_str(&args[2]).expect("creator_fee_vault (buy tx acct 17)");
+    // Fee vaults: explicit args, or auto-observed from a recent swap on the pool.
+    let (platform_fee_vault, creator_fee_vault) = match (args.get(1).and_then(|s| Pubkey::from_str(s).ok()), args.get(2).and_then(|s| Pubkey::from_str(s).ok())) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            let (a, b) = solroute_aggregator::execute::observe_bonk_fee_vaults(&rpc, &pool_addr)
+                .await.expect("observe fee vaults from recent swap");
+            println!("observed fee vaults: platform={a} creator={b}");
+            (a, b)
+        }
+    };
     let payer = args.get(3).and_then(|s| Pubkey::from_str(s).ok())
         .unwrap_or_else(|| Pubkey::from_str_const("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"));
 
