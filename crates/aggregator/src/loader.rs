@@ -183,9 +183,14 @@ impl PoolLoader {
                     // + getMultipleAccounts). If phase-1 also fails because the
                     // RPC demands pagination (Helius on cpamd…), page through
                     // getProgramAccountsV2 as a last resort.
-                    match self.two_phase_fetch(&program, filters.clone(), dex, cb).await {
+                    // Capped loads (PoolLoader::with_max_pools) podem parar a
+                    // paginação cedo em vez de enumerar o programa inteiro —
+                    // sem isso, `--max-per-dex 50` ainda paga o load completo.
+                    let stop_after =
+                        (self.max_pools_per_dex != usize::MAX).then_some(self.max_pools_per_dex);
+                    match self.two_phase_fetch(&program, filters.clone(), dex, cb, stop_after).await {
                         Ok(accounts) => accounts,
-                        Err(_) => match self.fetch_paginated_v2(&program, filters, dex, cb).await {
+                        Err(_) => match self.fetch_paginated_v2(&program, filters, dex, cb, stop_after).await {
                             Ok(accounts) => accounts,
                             Err(_) => continue,
                         },
@@ -415,6 +420,7 @@ impl PoolLoader {
         filters: Vec<RpcFilterType>,
         dex: &str,
         cb: &ProgressCallback,
+        stop_after: Option<usize>,
     ) -> Result<Vec<(Pubkey, Account)>, GenericError> {
         let config = RpcProgramAccountsConfig {
             filters: Some(filters),
@@ -454,6 +460,9 @@ impl PoolLoader {
                     }
                 }
             }
+            if stop_after.is_some_and(|cap| results.len() >= cap) {
+                break;
+            }
             cb(progress(dex, LoadPhase::FetchingPools));
         }
 
@@ -471,6 +480,7 @@ impl PoolLoader {
         filters: Vec<RpcFilterType>,
         dex: &str,
         cb: &ProgressCallback,
+        stop_after: Option<usize>,
     ) -> Result<Vec<(Pubkey, Account)>, GenericError> {
         use solana_rpc_client_api::request::RpcRequest;
 
@@ -486,11 +496,15 @@ impl PoolLoader {
         let mut pagination_key: Option<String> = None;
 
         loop {
+            // Com cap definido, pagina apenas o suficiente (uma página) em vez
+            // de enumerar o programa inteiro.
+            let remaining = stop_after.map(|cap| cap.saturating_sub(results.len()));
+            let page_limit = remaining.map(|r| r.min(1000)).unwrap_or(1000);
             let mut cfg = serde_json::json!({
                 "encoding": "base64",
                 "commitment": "confirmed",
                 "filters": filters_json,
-                "limit": 1000,
+                "limit": page_limit,
             });
             if let Some(key) = &pagination_key {
                 cfg["paginationKey"] = serde_json::Value::String(key.clone());
@@ -512,6 +526,10 @@ impl PoolLoader {
                 }
             }
             cb(progress(dex, LoadPhase::FetchingPools));
+
+            if stop_after.is_some_and(|cap| results.len() >= cap) {
+                break;
+            }
 
             match page.pagination_key {
                 Some(key) => pagination_key = Some(key),
