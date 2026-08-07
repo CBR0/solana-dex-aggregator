@@ -86,15 +86,17 @@ fn hub_usd(mint: &[u8]) -> Option<(f64, u8)> {
 
 /// Score USD estimado para pools de liquidez concentrada (CLMM, Whirlpool):
 /// TVL virtual = L × price_hub × (1/sqrt(P) + sqrt(P)), com P da convenção
-/// sqrt_price embutida (direção-agnóstico — ver teste). Sem hub: fallback L.
+/// sqrt_price embutida (direção-agnóstico — ver teste). Pools sem mint hub
+/// (pares meme-meme) ficam com score 0 e não entram no top-N — o cache
+/// mantém só pools com pelo menos um hub (SOL/USDC/USDT/stables...), que é o
+/// conjunto útil para roteamento de swaps.
 fn score_liquidity_usd(mints: &[u8], data: &[u8]) -> f64 {
     if mints.len() < 64 || data.len() < 32 {
         return 0.0;
     }
     let l = u128::from_le_bytes(data[0..16].try_into().unwrap());
     let sq_raw = u128::from_le_bytes(data[16..32].try_into().unwrap());
-    let price_hub = hub_usd(&mints[0..32]).or_else(|| hub_usd(&mints[32..64]));
-    match price_hub {
+    match hub_usd(&mints[0..32]).or_else(|| hub_usd(&mints[32..64])) {
         Some((p, _)) => {
             let sq = sq_raw as f64 / (1u128 << 64) as f64;
             if sq > 0.0 {
@@ -103,7 +105,7 @@ fn score_liquidity_usd(mints: &[u8], data: &[u8]) -> f64 {
                 l as f64 * p
             }
         }
-        None => l as f64,
+        None => 0.0,
     }
 }
 
