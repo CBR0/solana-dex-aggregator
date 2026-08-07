@@ -598,42 +598,57 @@ impl PoolLoader {
         }
 
         // Fase 2: full data dos candidatos + build (busca vaults) + re-rank.
-        let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
-        for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
-            let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
-            let accounts = self.rpc.get_multiple_accounts(&addrs).await?;
-            for (pk, acc) in chunk.iter().map(|(_, pk)| pk).zip(accounts.into_iter().flatten()) {
-                full.push((*pk, acc));
+        // Em erro (ex.: RPC instável), cai no early-stop arbitrário em vez de
+        // derrubar o DEX inteiro (load_all descarta Errs silenciosamente).
+        let result: Result<Vec<(u64, String, PoolEntry)>, GenericError> = async {
+            let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
+            for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
+                let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
+                let accounts = self.rpc.get_multiple_accounts(&addrs).await?;
+                for (pk, acc) in chunk.iter().map(|(_, pk)| pk).zip(accounts.into_iter().flatten()) {
+                    full.push((*pk, acc));
+                }
+            }
+
+            cb(progress(dex, LoadPhase::Deserializing { done: 0, total: full.len() }));
+            let entries = self.build_entries(desc, full.clone(), cb).await?;
+
+            // Ranking final por balanço REAL (maior dos 2 vaults) — mesmo
+            // critério do cache-shrink. Pools drenados/stale caem para o fim.
+            let mut ranked: Vec<(u64, String, PoolEntry)> = entries
+                .into_iter()
+                .map(|(addr, entry)| {
+                    let bal = bincode::deserialize::<CachedPool>(&entry.cached_data)
+                        .ok()
+                        .map(cached_max_balance)
+                        .unwrap_or(0);
+                    (bal, addr, entry)
+                })
+                .collect();
+            ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            ranked.truncate(self.max_pools_per_dex);
+            println!(
+                "[cache] {dex}: top-{} por liquidez REAL (vaults) de {} candidatos",
+                ranked.len(),
+                full.len()
+            );
+            Ok(ranked)
+        }
+        .await;
+
+        match result {
+            Ok(ranked) => {
+                let out: Vec<(String, PoolEntry)> =
+                    ranked.into_iter().map(|(_, a, e)| (a, e)).collect();
+                cb(progress(dex, LoadPhase::Complete { pool_count: out.len() }));
+                Ok(out)
+            }
+            Err(e) => {
+                println!("[cache] {dex}: fase de vaults reais falhou ({e}) — top-N arbitrário (early-stop)");
+                let raw = self.fetch_dex_raw(desc, cb).await;
+                self.finish_dex(desc, cb, raw).await
             }
         }
-
-        cb(progress(dex, LoadPhase::Deserializing { done: 0, total: full.len() }));
-        let total_candidates = full.len();
-        let entries = self.build_entries(desc, full, cb).await?;
-
-        // Ranking final por balanço REAL (maior dos 2 vaults) — mesmo critério
-        // do cache-shrink. Pools drenados/stale caem para o fim.
-        let mut ranked: Vec<(u64, String, PoolEntry)> = entries
-            .into_iter()
-            .map(|(addr, entry)| {
-                let bal = bincode::deserialize::<CachedPool>(&entry.cached_data)
-                    .ok()
-                    .map(cached_max_balance)
-                    .unwrap_or(0);
-                (bal, addr, entry)
-            })
-            .collect();
-        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        ranked.truncate(self.max_pools_per_dex);
-        println!(
-            "[cache] {dex}: top-{} por liquidez REAL (vaults) de {} candidatos",
-            ranked.len(),
-            total_candidates
-        );
-
-        let out: Vec<(String, PoolEntry)> = ranked.into_iter().map(|(_, a, e)| (a, e)).collect();
-        cb(progress(dex, LoadPhase::Complete { pool_count: out.len() }));
-        Ok(out)
     }
 
     /// Index of a DEX descriptor by its display name (e.g. "Raydium CLMM").
