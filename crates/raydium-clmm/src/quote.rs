@@ -14,7 +14,6 @@
 //!   accumulated so far (lower bound), not an error.
 
 use crate::RaydiumCLMMPool;
-use solana_pubkey::Pubkey;
 
 uint::construct_uint! {
     pub struct U256(4);
@@ -608,6 +607,7 @@ pub fn parse_amm_config_trade_fee_rate(data: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_pubkey::Pubkey;
 
     #[test]
     fn tick_math_bounds_and_roundtrip() {

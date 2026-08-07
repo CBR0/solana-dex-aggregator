@@ -94,13 +94,16 @@ pub async fn fetch_tick_arrays(
     registry: &mut PoolRegistry,
     store: &AccountStore,
 ) {
-    // Collect CLMM pools sorted by vault balance descending.
-    let mut clmm_pools: Vec<(&str, u64)> = registry
+    // Collect CLMM pools sorted by vault balance descending. The two vault
+    // balances are summed in u128: individual token amounts are u64, and a
+    // pool with large reserves in both vaults overflows u64 in debug builds
+    // (panic), breaking cold-start on big caches.
+    let mut clmm_pools: Vec<(&str, u128)> = registry
         .iter_pools()
         .filter(|(_, info)| info.dex_name == "Raydium CLMM")
         .map(|(addr, info)| {
-            let balance = store.read_token_balance(&info.quote_vault)
-                + store.read_token_balance(&info.base_vault);
+            let balance = store.read_token_balance(&info.quote_vault) as u128
+                + store.read_token_balance(&info.base_vault) as u128;
             (addr, balance)
         })
         .collect();
