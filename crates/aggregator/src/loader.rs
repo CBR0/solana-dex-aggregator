@@ -90,27 +90,34 @@ fn hub_usd(mint: &[u8]) -> Option<(f64, u8)> {
 }
 
 /// Score USD estimado para pools de liquidez concentrada (CLMM, Whirlpool):
-/// TVL virtual = L × price_hub × (1/sqrt(P) + sqrt(P)), com P da convenção
-/// sqrt_price embutida (direção-agnóstico — ver teste). Pools sem mint hub
-/// (pares meme-meme) ficam com score 0 e não entram no top-N — o cache
-/// mantém só pools com pelo menos um hub (SOL/USDC/USDT/stables...), que é o
-/// conjunto útil para roteamento de swaps.
+/// TVL virtual do lado hub = amount_hub × price_hub (amount_0 = L/sqrt(P),
+/// amount_1 = L×sqrt(P)), com P da convenção sqrt_price embutida
+/// (direção-agnóstico — ver teste). Pools sem mint hub ficam com score 0.
+///
+/// Pools hub-hub (WSOL/USDC, USDC/USDT, JitoSOL/USDC…) recebem prioridade
+/// (tier 1e30): são os que o bot roteia, e seus L/amounts embutidos são os
+/// mais confiáveis. Sem isso, pools hub-meme com L/sqrt stale (gigantes)
+/// dominam os candidatos e os pools reais ficam de fora do top-K.
 fn score_liquidity_usd(mints: &[u8], data: &[u8]) -> f64 {
     if mints.len() < 64 || data.len() < 32 {
         return 0.0;
     }
     let l = u128::from_le_bytes(data[0..16].try_into().unwrap());
     let sq_raw = u128::from_le_bytes(data[16..32].try_into().unwrap());
-    match hub_usd(&mints[0..32]).or_else(|| hub_usd(&mints[32..64])) {
-        Some((p, _)) => {
-            let sq = sq_raw as f64 / (1u128 << 64) as f64;
-            if sq > 0.0 {
-                l as f64 * p * (1.0 / sq + sq)
-            } else {
-                l as f64 * p
-            }
-        }
-        None => 0.0,
+    let sq = (sq_raw as f64 / (1u128 << 64) as f64).max(1e-12);
+    let m0 = &mints[0..32];
+    let m1 = &mints[32..64];
+    let usd0 = hub_usd(m0).map(|(p, _)| (l as f64 / sq) * p).unwrap_or(0.0);
+    let usd1 = hub_usd(m1).map(|(p, _)| (l as f64 * sq) * p).unwrap_or(0.0);
+    let virtual_usd = usd0.max(usd1);
+    if virtual_usd == 0.0 {
+        return 0.0; // sem hub
+    }
+    let hub_hub = hub_usd(m0).is_some() && hub_usd(m1).is_some();
+    if hub_hub {
+        1e30 + virtual_usd
+    } else {
+        virtual_usd
     }
 }
 
