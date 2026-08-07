@@ -130,16 +130,27 @@ fn score_amounts_usd(mints: &[u8], data: &[u8]) -> f64 {
     usd(a, &mints[0..32]) + usd(b, &mints[32..64])
 }
 
-/// Maior dos dois balanços cached de um pool — mesmo critério do cache-shrink.
-fn cached_max_balance(pool: CachedPool) -> u64 {
+/// USD estimado de um pool pelos balanços REAIS dos vaults + mints (preço hub
+/// constante): só os lados com mint hub contam (0 sem hub). Ranking em USD,
+/// não em balanço bruto — balanço bruto é dominado por tokens de supply alto
+/// (ex.: par WSOL/meme com 1.6e19 do token e $3 de SOL) e vira lixo pro bot.
+fn cached_usd_estimate(pool: CachedPool) -> f64 {
+    let usd = |bal: u64, mint: &[u8]| {
+        hub_usd(mint)
+            .map(|(p, d)| bal as f64 * p / 10f64.powi(d as i32))
+            .unwrap_or(0.0)
+    };
     match pool {
-        CachedPool::RaydiumV4 { quote_bal, base_bal, .. } => quote_bal.max(base_bal),
-        CachedPool::RaydiumClmm { v0_bal, v1_bal, .. } => v0_bal.max(v1_bal),
-        CachedPool::MeteoraDAMMV1 { a_bal, b_bal, .. } => a_bal.max(b_bal),
-        CachedPool::MeteoraDAMMV2 { a_bal, b_bal, .. } => a_bal.max(b_bal),
-        CachedPool::MeteoraDLMM { rx_bal, ry_bal, .. } => rx_bal.max(ry_bal),
-        CachedPool::PumpfunAmm { .. } => 0,
-        CachedPool::OrcaWhirlpool { a_bal, b_bal, .. } => a_bal.max(b_bal),
+        CachedPool::RaydiumClmm { pool: p, v0_bal, v1_bal, .. } => {
+            usd(v0_bal, p.token_mint_0.as_ref()).max(usd(v1_bal, p.token_mint_1.as_ref()))
+        }
+        CachedPool::OrcaWhirlpool { pool: p, a_bal, b_bal, .. } => {
+            usd(a_bal, p.token_mint_a.as_ref()).max(usd(b_bal, p.token_mint_b.as_ref()))
+        }
+        CachedPool::MeteoraDAMMV2 { pool: p, a_bal, b_bal, .. } => {
+            usd(a_bal, p.token_a_mint.as_ref()).max(usd(b_bal, p.token_b_mint.as_ref()))
+        }
+        _ => 0.0,
     }
 }
 
@@ -600,7 +611,7 @@ impl PoolLoader {
         // Fase 2: full data dos candidatos + build (busca vaults) + re-rank.
         // Em erro (ex.: RPC instável), cai no early-stop arbitrário em vez de
         // derrubar o DEX inteiro (load_all descarta Errs silenciosamente).
-        let result: Result<Vec<(u64, String, PoolEntry)>, GenericError> = async {
+        let result: Result<Vec<(f64, String, PoolEntry)>, GenericError> = async {
             let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
             for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
                 let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
@@ -613,22 +624,23 @@ impl PoolLoader {
             cb(progress(dex, LoadPhase::Deserializing { done: 0, total: full.len() }));
             let entries = self.build_entries(desc, full.clone(), cb).await?;
 
-            // Ranking final por balanço REAL (maior dos 2 vaults) — mesmo
-            // critério do cache-shrink. Pools drenados/stale caem para o fim.
-            let mut ranked: Vec<(u64, String, PoolEntry)> = entries
+            // Ranking final por USD REAL (balanço do lado hub × preço) — o
+            // critério útil pro bot. Pools drenados/stale e pares sem hub caem
+            // para o fim.
+            let mut ranked: Vec<(f64, String, PoolEntry)> = entries
                 .into_iter()
                 .map(|(addr, entry)| {
-                    let bal = bincode::deserialize::<CachedPool>(&entry.cached_data)
+                    let usd = bincode::deserialize::<CachedPool>(&entry.cached_data)
                         .ok()
-                        .map(cached_max_balance)
-                        .unwrap_or(0);
-                    (bal, addr, entry)
+                        .map(cached_usd_estimate)
+                        .unwrap_or(0.0);
+                    (usd, addr, entry)
                 })
                 .collect();
-            ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             ranked.truncate(self.max_pools_per_dex);
             println!(
-                "[cache] {dex}: top-{} por liquidez REAL (vaults) de {} candidatos",
+                "[cache] {dex}: top-{} por liquidez USD (vaults reais) de {} candidatos",
                 ranked.len(),
                 full.len()
             );
