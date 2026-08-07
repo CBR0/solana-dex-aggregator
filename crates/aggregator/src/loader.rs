@@ -39,29 +39,89 @@ const BALANCE_BATCH_SIZE: usize = 100;
 const BALANCE_CONCURRENCY: usize = 20;
 const DEFAULT_MAX_POOLS_PER_DEX: usize = usize::MAX;
 
-/// Proxy de liquidez embutido no pool account: lê apenas um slice do account
-/// data via dataSlice GPA (um request, resposta pequena — sem fetch dos
-/// vaults) e extrai um score. Permite rankear todos os pools de um DEX e
-/// manter os top-N mais líquidos sem pagar o custo de um full load.
+/// Proxy de liquidez embutido no pool account: dois dataSlice GPAs baratos
+/// (um para os mints, um para o campo de liquidez/reservas) permitem rankear
+/// todos os pools de um DEX e manter os top-N mais líquidos em USD sem pagar
+/// o custo de um full load (sem fetch dos vaults).
 struct LiquidityProxy {
-    /// dataSlice relativo ao início do account data (offset, length).
-    slice: (usize, usize),
-    /// Extrai o score (liquidez) dos bytes do slice (LE).
-    score: fn(&[u8]) -> u128,
+    /// dataSlice dos 2 mints (64 bytes: mint_0 .. mint_1).
+    mints: (usize, usize),
+    /// dataSlice do campo de score: CLMM/Whirlpool = L u128 + sqrt_price u128
+    /// (32B); DAMM V2 = token_a_amount u64 + token_b_amount u64 (16B).
+    data: (usize, usize),
+    /// Extrai o score (USD estimado) de (mints_bytes, data_bytes).
+    score: fn(&[u8], &[u8]) -> f64,
 }
 
-fn score_u128_le(bytes: &[u8]) -> u128 {
-    let mut buf = [0u8; 16];
-    buf[..bytes.len().min(16)].copy_from_slice(&bytes[..bytes.len().min(16)]);
-    u128::from_le_bytes(buf)
-}
-
-// Offsets do campo `liquidity` (u128) em cada pool account, verificados por
-// teste contra o layout borsh real (ver `liquidity_proxy_offsets_match_borsh`).
+// Offsets dos campos nos pool accounts, verificados por teste contra o layout
+// borsh real + accounts de mainnet (ver `crates/aggregator/tests/offset_check.rs`).
 // Descontam o discriminator de 8 bytes (o slice é relativo ao account data).
-const CLMM_LIQUIDITY_OFFSET: usize = 237; // Raydium CLMM (bump/keys/decimals/tick_spacing + 8)
-const WHIRLPOOL_LIQUIDITY_OFFSET: usize = 49; // Orca (config/bump/spacing/seeds/fees + 8)
-const DAMMV2_LIQUIDITY_OFFSET: usize = 360; // Meteora DAMM V2 (V2PoolFees + 6 pubkeys + 8)
+const CLMM_MINTS_OFFSET: usize = 73; // token_mint_0..1 (struct 65 + 8)
+const CLMM_LIQUIDITY_OFFSET: usize = 237; // liquidity u128 (struct 229 + 8)
+const WHIRLPOOL_MINTS_OFFSET: usize = 101; // token_mint_a (struct 93 + 8)
+const WHIRLPOOL_LIQUIDITY_OFFSET: usize = 49; // liquidity u128 (struct 41 + 8)
+const DAMMV2_MINTS_OFFSET: usize = 168; // token_a_mint..b_mint (struct 160 + 8)
+const DAMMV2_AMOUNTS_OFFSET: usize = 680; // token_a_amount u64 + token_b_amount u64
+
+/// Preço aproximado em USD + decimals de tokens "hub" (constantes — servem só
+/// para ranking relativo, não são oráculos).
+fn hub_usd(mint: &[u8]) -> Option<(f64, u8)> {
+    use std::str::FromStr;
+    const HUBS: &[(&str, f64, u8)] = &[
+        ("So11111111111111111111111111111111111111112", 150.0, 9), // WSOL
+        ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 1.0, 6),  // USDC
+        ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 1.0, 6),  // USDT
+        ("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", 175.0, 9), // JitoSOL
+        ("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", 165.0, 9), // mSOL
+        ("bSo13r4TkiE4KumL71LsHTPpL2euBYLPxVMh7aCVueG", 160.0, 9), // bSOL
+        ("jupSoLaHXQiZZTSpEWRVWmKVpsaQoptjT5z6q1ULjxa", 150.0, 9), // jupSOL
+        ("DSRnp2rGZgCkCw7jMYZ7bZkBYdK7JZaFgzYg5MbcGayL", 1.0, 9),  // USDe
+        ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZdbHsDbw2Gf", 1.0, 6),  // PYUSD
+        ("zebeczgi5fSEtbpfQ5Zbr7njtGVfbwF1BGuTk1UTpU", 1.1, 6),    // EURC
+    ];
+    HUBS.iter()
+        .find(|(s, _, _)| Pubkey::from_str(s).ok().as_ref().map(|p| p.as_ref()) == Some(mint))
+        .map(|(_, p, d)| (*p, *d))
+}
+
+/// Score USD estimado para pools de liquidez concentrada (CLMM, Whirlpool):
+/// TVL virtual = L × price_hub × (1/sqrt(P) + sqrt(P)), com P da convenção
+/// sqrt_price embutida (direção-agnóstico — ver teste). Sem hub: fallback L.
+fn score_liquidity_usd(mints: &[u8], data: &[u8]) -> f64 {
+    if mints.len() < 64 || data.len() < 32 {
+        return 0.0;
+    }
+    let l = u128::from_le_bytes(data[0..16].try_into().unwrap());
+    let sq_raw = u128::from_le_bytes(data[16..32].try_into().unwrap());
+    let price_hub = hub_usd(&mints[0..32]).or_else(|| hub_usd(&mints[32..64]));
+    match price_hub {
+        Some((p, _)) => {
+            let sq = sq_raw as f64 / (1u128 << 64) as f64;
+            if sq > 0.0 {
+                l as f64 * p * (1.0 / sq + sq)
+            } else {
+                l as f64 * p
+            }
+        }
+        None => l as f64,
+    }
+}
+
+/// Score USD para DAMM V2: token_a_amount/token_b_amount são as reservas
+/// cacheadas reais embutidas no pool account; com mints + preço hub vira USD.
+fn score_amounts_usd(mints: &[u8], data: &[u8]) -> f64 {
+    if mints.len() < 64 || data.len() < 16 {
+        return 0.0;
+    }
+    let a = u64::from_le_bytes(data[0..8].try_into().unwrap());
+    let b = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    let usd = |amt: u64, m: &[u8]| {
+        hub_usd(m)
+            .map(|(p, d)| amt as f64 * p / 10f64.powi(d as i32))
+            .unwrap_or(0.0)
+    };
+    usd(a, &mints[0..32]) + usd(b, &mints[32..64])
+}
 
 // Anchor discriminators (SHA256("account:<Name>")[0..8])
 const DISC_POOL_STATE: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70]; // Raydium CLMM
@@ -95,8 +155,9 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         data_sizes: &[1544],
         discriminator: Some(DISC_POOL_STATE),
         liquidity_proxy: Some(LiquidityProxy {
-            slice: (CLMM_LIQUIDITY_OFFSET, 16),
-            score: score_u128_le,
+            mints: (CLMM_MINTS_OFFSET, 64),
+            data: (CLMM_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price_x64 u128
+            score: score_liquidity_usd,
         }),
     },
     DexDescriptor {
@@ -112,8 +173,9 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         data_sizes: &[1112],
         discriminator: Some(DISC_POOL),
         liquidity_proxy: Some(LiquidityProxy {
-            slice: (DAMMV2_LIQUIDITY_OFFSET, 16),
-            score: score_u128_le,
+            mints: (DAMMV2_MINTS_OFFSET, 64),
+            data: (DAMMV2_AMOUNTS_OFFSET, 16), // token_a_amount + token_b_amount u64
+            score: score_amounts_usd,
         }),
     },
     DexDescriptor {
@@ -136,8 +198,9 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         data_sizes: &[WHIRLPOOL_LEN],
         discriminator: Some(DISC_WHIRLPOOL),
         liquidity_proxy: Some(LiquidityProxy {
-            slice: (WHIRLPOOL_LIQUIDITY_OFFSET, 16),
-            score: score_u128_le,
+            mints: (WHIRLPOOL_MINTS_OFFSET, 112), // token_mint_a + token_mint_b
+            data: (WHIRLPOOL_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price u128
+            score: score_liquidity_usd,
         }),
     },
 ];
@@ -317,10 +380,11 @@ impl PoolLoader {
     }
 
     /// Carrega apenas os top-N pools por liquidez sem pagar um full load:
-    /// para DEXs com proxy embutido, um único dataSlice GPA traz endereço +
-    /// bytes de liquidez de TODOS os pools (resposta pequena), rankeia e busca
-    /// full data + vaults só dos N escolhidos. DEXs sem proxy (V4, DAMM V1,
-    /// DLMM, Pumpfun — liquidez nos vaults) caem no early-stop arbitrário.
+    /// para DEXs com proxy embutido, dois dataSlice GPAs baratos (mints +
+    /// campo de liquidez/reservas) enumeram todos os pools, rankeia por USD
+    /// estimado (hub tokens) e busca full data + vaults só dos N escolhidos.
+    /// DEXs sem proxy (V4, DAMM V1, DLMM, Pumpfun — liquidez nos vaults) caem
+    /// no early-stop arbitrário.
     async fn load_dex_top(
         &self,
         desc: &DexDescriptor,
@@ -333,7 +397,8 @@ impl PoolLoader {
             return self.finish_dex(desc, cb, raw).await;
         };
 
-        // dataSlice GPA: endereço + slice do proxy para todos os pools.
+        // Dois dataSlice GPAs: mints + campo de score. Respostas pequenas —
+        // enumeram todos os pools sem baixar os dados completos.
         let program = Pubkey::from_str_const(desc.program_id);
         let mut filters = Vec::new();
         if let Some(&size) = desc.data_sizes.first() {
@@ -344,43 +409,52 @@ impl PoolLoader {
         if let Some(disc) = &desc.discriminator {
             filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
         }
-        let config = RpcProgramAccountsConfig {
-            filters: Some(filters),
-            account_config: RpcAccountInfoConfig {
-                encoding: Some(UiAccountEncoding::Base64),
-                commitment: Some(CommitmentConfig::confirmed()),
-                data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
-                    offset: proxy.slice.0,
-                    length: proxy.slice.1,
-                }),
+        let gpa = |offset: usize, length: usize| {
+            let config = RpcProgramAccountsConfig {
+                filters: Some(filters.clone()),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                        offset,
+                        length,
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
+            };
+            self.rpc.get_program_accounts_with_config(&program, config)
         };
 
-        let keyed = match self.rpc.get_program_accounts_with_config(&program, config).await {
-            Ok(k) => k,
-            Err(e) => {
+        let (mints_gpa, data_gpa) = tokio::join!(
+            gpa(proxy.mints.0, proxy.mints.1),
+            gpa(proxy.data.0, proxy.data.1),
+        );
+        let (mints_gpa, data_gpa) = match (mints_gpa, data_gpa) {
+            (Ok(m), Ok(d)) => (m, d),
+            (Err(e), _) | (_, Err(e)) => {
                 println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
                 let raw = self.fetch_dex_raw(desc, cb).await;
                 return self.finish_dex(desc, cb, raw).await;
             }
         };
 
-        // Score por pool e seleção dos top-N.
-        let total_pools = keyed.len();
-        let mut scored: Vec<(u128, Pubkey)> = Vec::with_capacity(total_pools);
-        for (pk, acc) in keyed {
-            // `get_program_accounts_with_config` já decodifica base64: `acc.data`
-            // contém os bytes do slice (dataSlice).
-            if acc.data.len() >= proxy.slice.1 {
-                scored.push(((proxy.score)(&acc.data), pk));
+        // Score por pool: mints de um GPA, campo de score do outro.
+        let mints_map: std::collections::HashMap<Pubkey, Vec<u8>> =
+            mints_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
+        let total_pools = data_gpa.len();
+        let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(total_pools);
+        for (pk, acc) in data_gpa {
+            if let Some(mints) = mints_map.get(&pk) {
+                if mints.len() >= proxy.mints.1 && acc.data.len() >= proxy.data.1 {
+                    scored.push(((proxy.score)(mints, &acc.data), pk));
+                }
             }
         }
-        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
         scored.truncate(self.max_pools_per_dex);
         println!(
-            "[cache] {dex}: top-{} por liquidez de {} pools",
+            "[cache] {dex}: top-{} por liquidez USD de {} pools",
             scored.len(),
             total_pools
         );
