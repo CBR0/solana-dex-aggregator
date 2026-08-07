@@ -169,31 +169,43 @@ impl PoolLoader {
                 filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
             }
 
-            let fetched = match self.fetch_filtered(&program, filters.clone()).await {
-                Ok(accounts) => accounts,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("excluded from account secondary indexes") {
-                        cb(progress(dex, LoadPhase::Error(
-                            "Program excluded from RPC indexes".into(),
-                        )));
-                        return Ok(vec![]);
-                    }
-                    // Response too large — try two-phase (dataSlice discovery
-                    // + getMultipleAccounts). If phase-1 also fails because the
-                    // RPC demands pagination (Helius on cpamd…), page through
-                    // getProgramAccountsV2 as a last resort.
-                    // Capped loads (PoolLoader::with_max_pools) podem parar a
-                    // paginação cedo em vez de enumerar o programa inteiro —
-                    // sem isso, `--max-per-dex 50` ainda paga o load completo.
-                    let stop_after =
-                        (self.max_pools_per_dex != usize::MAX).then_some(self.max_pools_per_dex);
-                    match self.two_phase_fetch(&program, filters.clone(), dex, cb, stop_after).await {
+            // Capped loads (`PoolLoader::with_max_pools`, ex.: `--max-per-dex
+            // 50`) não devem pagar o custo do programa inteiro: um único GPA
+            // (`fetch_filtered`) do DAMM V2 na NLN demora demais mesmo quando o
+            // RPC serve tudo de uma vez. Para cap finito, vai direto pro
+            // two-phase com early-stop (dataSlice só das chaves + batches até o
+            // cap); sem cap, mantém o GPA único com fallback two-phase/paginated.
+            let stop_after =
+                (self.max_pools_per_dex != usize::MAX).then_some(self.max_pools_per_dex);
+            let fetched = if stop_after.is_some() {
+                match self.two_phase_fetch(&program, filters.clone(), dex, cb, stop_after).await {
+                    Ok(accounts) => accounts,
+                    Err(_) => match self
+                        .fetch_paginated_v2(&program, filters.clone(), dex, cb, stop_after)
+                        .await
+                    {
                         Ok(accounts) => accounts,
-                        Err(_) => match self.fetch_paginated_v2(&program, filters, dex, cb, stop_after).await {
+                        Err(_) => match self.fetch_filtered(&program, filters.clone()).await {
                             Ok(accounts) => accounts,
                             Err(_) => continue,
                         },
+                    },
+                }
+            } else {
+                match self.fetch_filtered(&program, filters.clone()).await {
+                    Ok(accounts) => accounts,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("excluded from account secondary indexes") {
+                            cb(progress(dex, LoadPhase::Error(
+                                "Program excluded from RPC indexes".into(),
+                            )));
+                            return Ok(vec![]);
+                        }
+                        match self.two_phase_fetch(&program, filters, dex, cb, None).await {
+                            Ok(accounts) => accounts,
+                            Err(_) => continue,
+                        }
                     }
                 }
             };
