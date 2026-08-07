@@ -39,6 +39,30 @@ const BALANCE_BATCH_SIZE: usize = 100;
 const BALANCE_CONCURRENCY: usize = 20;
 const DEFAULT_MAX_POOLS_PER_DEX: usize = usize::MAX;
 
+/// Proxy de liquidez embutido no pool account: lê apenas um slice do account
+/// data via dataSlice GPA (um request, resposta pequena — sem fetch dos
+/// vaults) e extrai um score. Permite rankear todos os pools de um DEX e
+/// manter os top-N mais líquidos sem pagar o custo de um full load.
+struct LiquidityProxy {
+    /// dataSlice relativo ao início do account data (offset, length).
+    slice: (usize, usize),
+    /// Extrai o score (liquidez) dos bytes do slice (LE).
+    score: fn(&[u8]) -> u128,
+}
+
+fn score_u128_le(bytes: &[u8]) -> u128 {
+    let mut buf = [0u8; 16];
+    buf[..bytes.len().min(16)].copy_from_slice(&bytes[..bytes.len().min(16)]);
+    u128::from_le_bytes(buf)
+}
+
+// Offsets do campo `liquidity` (u128) em cada pool account, verificados por
+// teste contra o layout borsh real (ver `liquidity_proxy_offsets_match_borsh`).
+// Descontam o discriminator de 8 bytes (o slice é relativo ao account data).
+const CLMM_LIQUIDITY_OFFSET: usize = 237; // Raydium CLMM (bump/keys/decimals/tick_spacing + 8)
+const WHIRLPOOL_LIQUIDITY_OFFSET: usize = 49; // Orca (config/bump/spacing/seeds/fees + 8)
+const DAMMV2_LIQUIDITY_OFFSET: usize = 360; // Meteora DAMM V2 (V2PoolFees + 6 pubkeys + 8)
+
 // Anchor discriminators (SHA256("account:<Name>")[0..8])
 const DISC_POOL_STATE: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70]; // Raydium CLMM
 const DISC_POOL: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188]; // DAMM V1/V2, Pumpfun
@@ -51,6 +75,10 @@ struct DexDescriptor {
     data_sizes: &'static [u64],
     /// Anchor discriminator (first 8 bytes). None for non-Anchor (Raydium V4).
     discriminator: Option<[u8; 8]>,
+    /// Proxy de liquidez embutido no pool account. None = sem proxy (DEXs de
+    /// balanço em vaults externos: Raydium V4, DAMM V1, DLMM, Pumpfun) — nesses,
+    /// o modo top-N cai no early-stop arbitrário.
+    liquidity_proxy: Option<LiquidityProxy>,
 }
 
 const DESCRIPTORS: [DexDescriptor; 7] = [
@@ -59,48 +87,65 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
         data_sizes: &[752],
         discriminator: None,
+        liquidity_proxy: None, // reservas nos vaults (sem campo embutido)
     },
     DexDescriptor {
         name: "Raydium CLMM",
         program_id: RAYDIUM_CLMM,
         data_sizes: &[1544],
         discriminator: Some(DISC_POOL_STATE),
+        liquidity_proxy: Some(LiquidityProxy {
+            slice: (CLMM_LIQUIDITY_OFFSET, 16),
+            score: score_u128_le,
+        }),
     },
     DexDescriptor {
         name: "Meteora DAMM V1",
         program_id: METEORA_DYNAMIC_AMM,
         data_sizes: &[944],
         discriminator: Some(DISC_POOL),
+        liquidity_proxy: None, // sem campo de liquidez no pool account
     },
     DexDescriptor {
         name: "Meteora DAMM V2",
         program_id: METEORA_DYNAMIC_AMM_V2,
         data_sizes: &[1112],
         discriminator: Some(DISC_POOL),
+        liquidity_proxy: Some(LiquidityProxy {
+            slice: (DAMMV2_LIQUIDITY_OFFSET, 16),
+            score: score_u128_le,
+        }),
     },
     DexDescriptor {
         name: "Meteora DLMM",
         program_id: METEORA_DYNAMIC_LMM,
         data_sizes: &[904],
         discriminator: Some(DISC_LB_PAIR),
+        liquidity_proxy: None, // liquidez distribuída nos bin arrays
     },
     DexDescriptor {
         name: "Pumpfun AMM",
         program_id: PUMPFUN_AMM_PROGRAM,
         data_sizes: &[],
         discriminator: Some(DISC_POOL),
+        liquidity_proxy: None, // bonding curve em conta separada
     },
     DexDescriptor {
         name: "Orca Whirlpool",
         program_id: ORCA_WHIRLPOOL_PROGRAM,
         data_sizes: &[WHIRLPOOL_LEN],
         discriminator: Some(DISC_WHIRLPOOL),
+        liquidity_proxy: Some(LiquidityProxy {
+            slice: (WHIRLPOOL_LIQUIDITY_OFFSET, 16),
+            score: score_u128_le,
+        }),
     },
 ];
 
 pub struct PoolLoader {
     rpc: Arc<RpcClient>,
     max_pools_per_dex: usize,
+    top_by_liquidity: bool,
 }
 
 impl PoolLoader {
@@ -110,12 +155,23 @@ impl PoolLoader {
             Duration::from_secs(300),
             CommitmentConfig::confirmed(),
         ));
-        Self { rpc, max_pools_per_dex: DEFAULT_MAX_POOLS_PER_DEX }
+        Self {
+            rpc,
+            max_pools_per_dex: DEFAULT_MAX_POOLS_PER_DEX,
+            top_by_liquidity: false,
+        }
     }
 
     /// Override the per-DEX pool cap. Set to `usize::MAX` for no limit.
     pub fn with_max_pools(mut self, max: usize) -> Self {
         self.max_pools_per_dex = max;
+        self
+    }
+
+    /// Mantém os top-N pools por liquidez (proxy embutido no pool account)
+    /// em vez dos primeiros N arbitrários da paginação.
+    pub fn with_top_by_liquidity(mut self, top: bool) -> Self {
+        self.top_by_liquidity = top;
         self
     }
 
@@ -154,6 +210,24 @@ impl PoolLoader {
         let dex = desc.name;
         cb(progress(dex, LoadPhase::FetchingPools));
 
+        // Top-N por liquidez (proxy embutido no pool account) quando o loader
+        // está em modo top-by-liquidity com cap finito.
+        if self.top_by_liquidity && self.max_pools_per_dex != usize::MAX {
+            return self.load_dex_top(desc, cb).await;
+        }
+
+        let raw_accounts = self.fetch_dex_raw(desc, cb).await;
+        self.finish_dex(desc, cb, raw_accounts).await
+    }
+
+    /// Loop de fetch bruto por data_size (early-stop quando capado; GPA único
+    /// com fallback two-phase/paginated quando sem cap).
+    async fn fetch_dex_raw(
+        &self,
+        desc: &DexDescriptor,
+        cb: &ProgressCallback,
+    ) -> Vec<(Pubkey, Account)> {
+        let dex = desc.name;
         let program = Pubkey::from_str_const(desc.program_id);
         let mut raw_accounts: Vec<(Pubkey, Account)> = Vec::new();
 
@@ -200,7 +274,7 @@ impl PoolLoader {
                             cb(progress(dex, LoadPhase::Error(
                                 "Program excluded from RPC indexes".into(),
                             )));
-                            return Ok(vec![]);
+                            return Vec::new();
                         }
                         match self.two_phase_fetch(&program, filters, dex, cb, None).await {
                             Ok(accounts) => accounts,
@@ -213,11 +287,23 @@ impl PoolLoader {
             raw_accounts.extend(fetched);
         }
 
+        raw_accounts
+    }
+
+    /// Cauda comum do load: cap, fases Deserializing/build_entries/Complete.
+    async fn finish_dex(
+        &self,
+        desc: &DexDescriptor,
+        cb: &ProgressCallback,
+        raw_accounts: Vec<(Pubkey, Account)>,
+    ) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = desc.name;
         if raw_accounts.is_empty() {
             cb(progress(dex, LoadPhase::Complete { pool_count: 0 }));
             return Ok(vec![]);
         }
 
+        let mut raw_accounts = raw_accounts;
         if raw_accounts.len() > self.max_pools_per_dex {
             raw_accounts.truncate(self.max_pools_per_dex);
         }
@@ -228,6 +314,88 @@ impl PoolLoader {
         let entries = self.build_entries(desc, raw_accounts, cb).await?;
         cb(progress(dex, LoadPhase::Complete { pool_count: entries.len() }));
         Ok(entries)
+    }
+
+    /// Carrega apenas os top-N pools por liquidez sem pagar um full load:
+    /// para DEXs com proxy embutido, um único dataSlice GPA traz endereço +
+    /// bytes de liquidez de TODOS os pools (resposta pequena), rankeia e busca
+    /// full data + vaults só dos N escolhidos. DEXs sem proxy (V4, DAMM V1,
+    /// DLMM, Pumpfun — liquidez nos vaults) caem no early-stop arbitrário.
+    async fn load_dex_top(
+        &self,
+        desc: &DexDescriptor,
+        cb: &ProgressCallback,
+    ) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = desc.name;
+        let Some(proxy) = desc.liquidity_proxy.as_ref() else {
+            println!("[cache] {dex}: sem proxy de liquidez embutido — top-N arbitrário (early-stop)");
+            let raw = self.fetch_dex_raw(desc, cb).await;
+            return self.finish_dex(desc, cb, raw).await;
+        };
+
+        // dataSlice GPA: endereço + slice do proxy para todos os pools.
+        let program = Pubkey::from_str_const(desc.program_id);
+        let mut filters = Vec::new();
+        if let Some(&size) = desc.data_sizes.first() {
+            if size > 0 {
+                filters.push(RpcFilterType::DataSize(size));
+            }
+        }
+        if let Some(disc) = &desc.discriminator {
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+        }
+        let config = RpcProgramAccountsConfig {
+            filters: Some(filters),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                commitment: Some(CommitmentConfig::confirmed()),
+                data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                    offset: proxy.slice.0,
+                    length: proxy.slice.1,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let keyed = match self.rpc.get_program_accounts_with_config(&program, config).await {
+            Ok(k) => k,
+            Err(e) => {
+                println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
+                let raw = self.fetch_dex_raw(desc, cb).await;
+                return self.finish_dex(desc, cb, raw).await;
+            }
+        };
+
+        // Score por pool e seleção dos top-N.
+        let total_pools = keyed.len();
+        let mut scored: Vec<(u128, Pubkey)> = Vec::with_capacity(total_pools);
+        for (pk, acc) in keyed {
+            // `get_program_accounts_with_config` já decodifica base64: `acc.data`
+            // contém os bytes do slice (dataSlice).
+            if acc.data.len() >= proxy.slice.1 {
+                scored.push(((proxy.score)(&acc.data), pk));
+            }
+        }
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        scored.truncate(self.max_pools_per_dex);
+        println!(
+            "[cache] {dex}: top-{} por liquidez de {} pools",
+            scored.len(),
+            total_pools
+        );
+
+        // Full data dos top-N (getMultipleAccounts em batches).
+        let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
+        for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
+            let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
+            let accounts = self.rpc.get_multiple_accounts(&addrs).await?;
+            for (pk, acc) in chunk.iter().map(|(_, pk)| pk).zip(accounts.into_iter().flatten()) {
+                full.push((*pk, acc));
+            }
+        }
+
+        self.finish_dex(desc, cb, full).await
     }
 
     /// Index of a DEX descriptor by its display name (e.g. "Raydium CLMM").
