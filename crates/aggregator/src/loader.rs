@@ -134,6 +134,12 @@ fn score_amounts_usd(mints: &[u8], data: &[u8]) -> f64 {
 /// constante): só os lados com mint hub contam (0 sem hub). Ranking em USD,
 /// não em balanço bruto — balanço bruto é dominado por tokens de supply alto
 /// (ex.: par WSOL/meme com 1.6e19 do token e $3 de SOL) e vira lixo pro bot.
+///
+/// DAMM V2 adicionalmente exige FRESCOR: os amounts cacheados embutidos
+/// (token_a_amount/token_b_amount) precisam estar próximos dos balanços reais
+/// dos vaults (razão ≥ 0.5 em ambos os lados). Pools inativos/drenados mantêm
+/// dados embutidos stale (ex.: sqrt de quando SOL custava $10) e suas quotes
+/// viram lixo — são excluídos do top-N.
 fn cached_usd_estimate(pool: CachedPool) -> f64 {
     let usd = |bal: u64, mint: &[u8]| {
         hub_usd(mint)
@@ -148,6 +154,12 @@ fn cached_usd_estimate(pool: CachedPool) -> f64 {
             usd(a_bal, p.token_mint_a.as_ref()).max(usd(b_bal, p.token_mint_b.as_ref()))
         }
         CachedPool::MeteoraDAMMV2 { pool: p, a_bal, b_bal, .. } => {
+            let fresh = |embedded: u64, vault: u64| {
+                vault == 0 || (embedded as f64 / vault as f64) >= 0.5
+            };
+            if !(fresh(p.token_a_amount, a_bal) && fresh(p.token_b_amount, b_bal)) {
+                return 0.0; // dados embutidos stale — quotes não confiáveis
+            }
             usd(a_bal, p.token_a_mint.as_ref()).max(usd(b_bal, p.token_b_mint.as_ref()))
         }
         _ => 0.0,
