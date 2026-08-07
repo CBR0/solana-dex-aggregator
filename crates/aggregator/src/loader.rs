@@ -51,6 +51,11 @@ struct LiquidityProxy {
     data: (usize, usize),
     /// Extrai o score (USD estimado) de (mints_bytes, data_bytes).
     score: fn(&[u8], &[u8]) -> f64,
+    /// Quando o programa tem pools demais para enumerar num dataSlice GPA
+    /// (DAMM V2: 1.37M pools → resposta de mints > limite do RPC), consulta
+    /// por hub via memcmp filter no campo de mint (offset dos 2 mints), com
+    /// resposta limitada. `data` é então só o campo de score por lado.
+    hub_mints: Option<(usize, usize)>,
 }
 
 // Offsets dos campos nos pool accounts, verificados por teste contra o layout
@@ -160,6 +165,7 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
             mints: (CLMM_MINTS_OFFSET, 64),
             data: (CLMM_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price_x64 u128
             score: score_liquidity_usd,
+            hub_mints: None,
         }),
     },
     DexDescriptor {
@@ -178,6 +184,7 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
             mints: (DAMMV2_MINTS_OFFSET, 64),
             data: (DAMMV2_AMOUNTS_OFFSET, 16), // token_a_amount + token_b_amount u64
             score: score_amounts_usd,
+            hub_mints: Some((DAMMV2_MINTS_OFFSET, DAMMV2_MINTS_OFFSET + 32)),
         }),
     },
     DexDescriptor {
@@ -203,6 +210,7 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
             mints: (WHIRLPOOL_MINTS_OFFSET, 112), // token_mint_a + token_mint_b
             data: (WHIRLPOOL_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price u128
             score: score_liquidity_usd,
+            hub_mints: None,
         }),
     },
 ];
@@ -381,6 +389,95 @@ impl PoolLoader {
         Ok(entries)
     }
 
+    /// Score USD por consultas hub-filtered: para cada hub do whitelist, duas
+    /// queries (mint_a == hub e mint_b == hub) com dataSlice só do campo de
+    /// score. Respostas limitadas ao subconjunto do hub — viável quando o
+    /// programa tem pools demais para um dataSlice GPA único. Pools com hub
+    /// dos dois lados somam os dois scores; sem hub não aparecem.
+    async fn score_hub_filtered(
+        &self,
+        desc: &DexDescriptor,
+        proxy: &LiquidityProxy,
+        off_a: usize,
+        off_b: usize,
+    ) -> Result<Vec<(f64, Pubkey)>, GenericError> {
+        use std::collections::HashMap;
+        use std::str::FromStr;
+
+        let dex = desc.name;
+        let program = Pubkey::from_str_const(desc.program_id);
+        let mut filters = Vec::new();
+        if let Some(&size) = desc.data_sizes.first() {
+            if size > 0 {
+                filters.push(RpcFilterType::DataSize(size));
+            }
+        }
+        if let Some(disc) = &desc.discriminator {
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+        }
+
+        let mut scored: HashMap<Pubkey, f64> = HashMap::new();
+        const HUBS: &[(&str, f64, u8)] = &[
+            ("So11111111111111111111111111111111111111112", 150.0, 9),
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 1.0, 6),
+            ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 1.0, 6),
+            ("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", 175.0, 9),
+            ("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", 165.0, 9),
+            ("bSo13r4TkiE4KumL71LsHTPpL2euBYLPxVMh7aCVueG", 160.0, 9),
+            ("jupSoLaHXQiZZTSpEWRVWmKVpsaQoptjT5z6q1ULjxa", 150.0, 9),
+            ("DSRnp2rGZgCkCw7jMYZ7bZkBYdK7JZaFgzYg5MbcGayL", 1.0, 9),
+            ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZdbHsDbw2Gf", 1.0, 6),
+            ("zebeczgi5fSEtbpfQ5Zbr7njtGVfbwF1BGuTk1UTpU", 1.1, 6),
+        ];
+
+        let mut any_ok = false;
+        for (hub_b58, price, decimals) in HUBS {
+            let Ok(hub) = Pubkey::from_str(hub_b58) else { continue };
+            // (offset do mint, offset do amount correspondente no data slice)
+            for (mint_off, amt_off) in [(off_a, 0usize), (off_b, 8usize)] {
+                let mut f = filters.clone();
+                f.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(
+                    mint_off,
+                    hub.as_ref().to_vec(),
+                )));
+                let config = RpcProgramAccountsConfig {
+                    filters: Some(f),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                            offset: proxy.data.0,
+                            length: proxy.data.1,
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                match self.rpc.get_program_accounts_with_config(&program, config).await {
+                    Ok(keyed) => {
+                        any_ok = true;
+                        for (pk, acc) in keyed {
+                            if acc.data.len() >= amt_off + 8 {
+                                let amt =
+                                    u64::from_le_bytes(acc.data[amt_off..amt_off + 8].try_into().unwrap());
+                                let usd = amt as f64 * price / 10f64.powi(*decimals as i32);
+                                *scored.entry(pk).or_insert(0.0) += usd;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("[cache] {dex}: query hub {hub_b58} falhou ({e})");
+                    }
+                }
+            }
+        }
+
+        if !any_ok {
+            return Err("todas as queries hub falharam".into());
+        }
+        Ok(scored.into_iter().map(|(pk, s)| (s, pk)).collect())
+    }
+
     /// Carrega apenas os top-N pools por liquidez sem pagar um full load:
     /// para DEXs com proxy embutido, dois dataSlice GPAs baratos (mints +
     /// campo de liquidez/reservas) enumeram todos os pools, rankeia por USD
@@ -398,6 +495,41 @@ impl PoolLoader {
             let raw = self.fetch_dex_raw(desc, cb).await;
             return self.finish_dex(desc, cb, raw).await;
         };
+
+        // DEXs com pools demais para enumerar (hub_mints setado): consulta por
+        // hub via memcmp — resposta limitada, sem o GPA gigante de mints.
+        if let Some((off_a, off_b)) = proxy.hub_mints {
+            let mut scored: Vec<(f64, Pubkey)> = match self
+                .score_hub_filtered(desc, proxy, off_a, off_b)
+                .await
+            {
+                Ok(s) => s,
+                Err(_) => {
+                    println!("[cache] {dex}: queries por hub falharam — top-N arbitrário (early-stop)");
+                    let raw = self.fetch_dex_raw(desc, cb).await;
+                    return self.finish_dex(desc, cb, raw).await;
+                }
+            };
+            let total_pools = scored.len();
+            scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+            scored.truncate(self.max_pools_per_dex);
+            println!(
+                "[cache] {dex}: top-{} por liquidez USD de {} pools (hub-filtered)",
+                scored.len(),
+                total_pools
+            );
+
+            // Full data dos top-N (getMultipleAccounts em batches).
+            let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
+            for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
+                let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
+                let accounts = self.rpc.get_multiple_accounts(&addrs).await?;
+                for (pk, acc) in chunk.iter().map(|(_, pk)| pk).zip(accounts.into_iter().flatten()) {
+                    full.push((*pk, acc));
+                }
+            }
+            return self.finish_dex(desc, cb, full).await;
+        }
 
         // Dois dataSlice GPAs: mints + campo de score. Respostas pequenas —
         // enumeram todos os pools sem baixar os dados completos.
