@@ -130,6 +130,19 @@ fn score_amounts_usd(mints: &[u8], data: &[u8]) -> f64 {
     usd(a, &mints[0..32]) + usd(b, &mints[32..64])
 }
 
+/// Maior dos dois balanços cached de um pool — mesmo critério do cache-shrink.
+fn cached_max_balance(pool: CachedPool) -> u64 {
+    match pool {
+        CachedPool::RaydiumV4 { quote_bal, base_bal, .. } => quote_bal.max(base_bal),
+        CachedPool::RaydiumClmm { v0_bal, v1_bal, .. } => v0_bal.max(v1_bal),
+        CachedPool::MeteoraDAMMV1 { a_bal, b_bal, .. } => a_bal.max(b_bal),
+        CachedPool::MeteoraDAMMV2 { a_bal, b_bal, .. } => a_bal.max(b_bal),
+        CachedPool::MeteoraDLMM { rx_bal, ry_bal, .. } => rx_bal.max(ry_bal),
+        CachedPool::PumpfunAmm { .. } => 0,
+        CachedPool::OrcaWhirlpool { a_bal, b_bal, .. } => a_bal.max(b_bal),
+    }
+}
+
 // Anchor discriminators (SHA256("account:<Name>")[0..8])
 const DISC_POOL_STATE: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70]; // Raydium CLMM
 const DISC_POOL: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188]; // DAMM V1/V2, Pumpfun
@@ -478,10 +491,19 @@ impl PoolLoader {
         Ok(scored.into_iter().map(|(pk, s)| (s, pk)).collect())
     }
 
-    /// Carrega apenas os top-N pools por liquidez sem pagar um full load:
-    /// para DEXs com proxy embutido, dois dataSlice GPAs baratos (mints +
-    /// campo de liquidez/reservas) enumeram todos os pools, rankeia por USD
-    /// estimado (hub tokens) e busca full data + vaults só dos N escolhidos.
+    /// Carrega apenas os top-N pools por liquidez sem pagar um full load.
+    ///
+    /// Fase 1 — seleção de candidatos por dados embutidos (barato): para DEXs
+    /// com proxy, dataSlice GPAs (CLMM/Whirlpool: mints + L; DAMM V2: queries
+    /// hub-filtered por memcmp com os amounts cacheados) enumeram todos os
+    /// pools e mantém os top-K (K = 10×N, min 200). Dados embutidos podem
+    /// estar stale em pools inativos, então servem só para reduzir o universo.
+    ///
+    /// Fase 2 — ranking por balanços REAIS: busca full data dos K candidatos,
+    /// deserializa (vaults embutidos) e usa o fluxo normal de build (que já
+    /// busca os vaults), re-rankeando pelo maior balanço real — o mesmo critério
+    /// do cache-shrink. Pools drenados (embedded grande, vaults ~0) caem fora.
+    ///
     /// DEXs sem proxy (V4, DAMM V1, DLMM, Pumpfun — liquidez nos vaults) caem
     /// no early-stop arbitrário.
     async fn load_dex_top(
@@ -496,104 +518,86 @@ impl PoolLoader {
             return self.finish_dex(desc, cb, raw).await;
         };
 
-        // DEXs com pools demais para enumerar (hub_mints setado): consulta por
-        // hub via memcmp — resposta limitada, sem o GPA gigante de mints.
-        if let Some((off_a, off_b)) = proxy.hub_mints {
-            let mut scored: Vec<(f64, Pubkey)> = match self
-                .score_hub_filtered(desc, proxy, off_a, off_b)
-                .await
-            {
+        // Fase 1: scores embutidos — hub queries (DEXs grandes) ou 2-GPAs.
+        let mut scored: Vec<(f64, Pubkey)> = if let Some((off_a, off_b)) = proxy.hub_mints {
+            match self.score_hub_filtered(desc, proxy, off_a, off_b).await {
                 Ok(s) => s,
                 Err(_) => {
                     println!("[cache] {dex}: queries por hub falharam — top-N arbitrário (early-stop)");
                     let raw = self.fetch_dex_raw(desc, cb).await;
                     return self.finish_dex(desc, cb, raw).await;
                 }
-            };
-            let total_pools = scored.len();
-            scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-            scored.truncate(self.max_pools_per_dex);
-            println!(
-                "[cache] {dex}: top-{} por liquidez USD de {} pools (hub-filtered)",
-                scored.len(),
-                total_pools
-            );
-
-            // Full data dos top-N (getMultipleAccounts em batches).
-            let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
-            for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
-                let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
-                let accounts = self.rpc.get_multiple_accounts(&addrs).await?;
-                for (pk, acc) in chunk.iter().map(|(_, pk)| pk).zip(accounts.into_iter().flatten()) {
-                    full.push((*pk, acc));
+            }
+        } else {
+            let program = Pubkey::from_str_const(desc.program_id);
+            let mut filters = Vec::new();
+            if let Some(&size) = desc.data_sizes.first() {
+                if size > 0 {
+                    filters.push(RpcFilterType::DataSize(size));
                 }
             }
-            return self.finish_dex(desc, cb, full).await;
-        }
-
-        // Dois dataSlice GPAs: mints + campo de score. Respostas pequenas —
-        // enumeram todos os pools sem baixar os dados completos.
-        let program = Pubkey::from_str_const(desc.program_id);
-        let mut filters = Vec::new();
-        if let Some(&size) = desc.data_sizes.first() {
-            if size > 0 {
-                filters.push(RpcFilterType::DataSize(size));
+            if let Some(disc) = &desc.discriminator {
+                filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
             }
-        }
-        if let Some(disc) = &desc.discriminator {
-            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
-        }
-        let gpa = |offset: usize, length: usize| {
-            let config = RpcProgramAccountsConfig {
-                filters: Some(filters.clone()),
-                account_config: RpcAccountInfoConfig {
-                    encoding: Some(UiAccountEncoding::Base64),
-                    commitment: Some(CommitmentConfig::confirmed()),
-                    data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
-                        offset,
-                        length,
-                    }),
+            let gpa = |offset: usize, length: usize| {
+                let config = RpcProgramAccountsConfig {
+                    filters: Some(filters.clone()),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        data_slice: Some(
+                            solana_account_decoder_client_types::UiDataSliceConfig {
+                                offset,
+                                length,
+                            },
+                        ),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
+                };
+                self.rpc.get_program_accounts_with_config(&program, config)
             };
-            self.rpc.get_program_accounts_with_config(&program, config)
-        };
-
-        let (mints_gpa, data_gpa) = tokio::join!(
-            gpa(proxy.mints.0, proxy.mints.1),
-            gpa(proxy.data.0, proxy.data.1),
-        );
-        let (mints_gpa, data_gpa) = match (mints_gpa, data_gpa) {
-            (Ok(m), Ok(d)) => (m, d),
-            (Err(e), _) | (_, Err(e)) => {
-                println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
-                let raw = self.fetch_dex_raw(desc, cb).await;
-                return self.finish_dex(desc, cb, raw).await;
-            }
-        };
-
-        // Score por pool: mints de um GPA, campo de score do outro.
-        let mints_map: std::collections::HashMap<Pubkey, Vec<u8>> =
-            mints_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
-        let total_pools = data_gpa.len();
-        let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(total_pools);
-        for (pk, acc) in data_gpa {
-            if let Some(mints) = mints_map.get(&pk) {
-                if mints.len() >= proxy.mints.1 && acc.data.len() >= proxy.data.1 {
-                    scored.push(((proxy.score)(mints, &acc.data), pk));
+            let (mints_gpa, data_gpa) = tokio::join!(
+                gpa(proxy.mints.0, proxy.mints.1),
+                gpa(proxy.data.0, proxy.data.1),
+            );
+            let (mints_gpa, data_gpa) = match (mints_gpa, data_gpa) {
+                (Ok(m), Ok(d)) => (m, d),
+                (Err(e), _) | (_, Err(e)) => {
+                    println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
+                    let raw = self.fetch_dex_raw(desc, cb).await;
+                    return self.finish_dex(desc, cb, raw).await;
+                }
+            };
+            let mints_map: std::collections::HashMap<Pubkey, Vec<u8>> =
+                mints_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
+            let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(data_gpa.len());
+            for (pk, acc) in data_gpa {
+                if let Some(mints) = mints_map.get(&pk) {
+                    if mints.len() >= proxy.mints.1 && acc.data.len() >= proxy.data.1 {
+                        scored.push(((proxy.score)(mints, &acc.data), pk));
+                    }
                 }
             }
-        }
-        scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-        scored.truncate(self.max_pools_per_dex);
-        println!(
-            "[cache] {dex}: top-{} por liquidez USD de {} pools",
-            scored.len(),
-            total_pools
-        );
+            scored
+        };
 
-        // Full data dos top-N (getMultipleAccounts em batches).
+        let total_pools = scored.len();
+        scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        // Pools com score 0 (sem hub) ficam de fora.
+        scored.retain(|(s, _)| *s > 0.0);
+        let k = (self.max_pools_per_dex * 10).max(200);
+        scored.truncate(k);
+        println!(
+            "[cache] {dex}: {n} candidatos (embedded, de {total_pools} pools) — buscando vaults reais…",
+            n = scored.len()
+        );
+        if scored.is_empty() {
+            cb(progress(dex, LoadPhase::Complete { pool_count: 0 }));
+            return Ok(vec![]);
+        }
+
+        // Fase 2: full data dos candidatos + build (busca vaults) + re-rank.
         let mut full: Vec<(Pubkey, Account)> = Vec::with_capacity(scored.len());
         for chunk in scored.chunks(BALANCE_BATCH_SIZE) {
             let addrs: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
@@ -603,7 +607,33 @@ impl PoolLoader {
             }
         }
 
-        self.finish_dex(desc, cb, full).await
+        cb(progress(dex, LoadPhase::Deserializing { done: 0, total: full.len() }));
+        let total_candidates = full.len();
+        let entries = self.build_entries(desc, full, cb).await?;
+
+        // Ranking final por balanço REAL (maior dos 2 vaults) — mesmo critério
+        // do cache-shrink. Pools drenados/stale caem para o fim.
+        let mut ranked: Vec<(u64, String, PoolEntry)> = entries
+            .into_iter()
+            .map(|(addr, entry)| {
+                let bal = bincode::deserialize::<CachedPool>(&entry.cached_data)
+                    .ok()
+                    .map(cached_max_balance)
+                    .unwrap_or(0);
+                (bal, addr, entry)
+            })
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.truncate(self.max_pools_per_dex);
+        println!(
+            "[cache] {dex}: top-{} por liquidez REAL (vaults) de {} candidatos",
+            ranked.len(),
+            total_candidates
+        );
+
+        let out: Vec<(String, PoolEntry)> = ranked.into_iter().map(|(_, a, e)| (a, e)).collect();
+        cb(progress(dex, LoadPhase::Complete { pool_count: out.len() }));
+        Ok(out)
     }
 
     /// Index of a DEX descriptor by its display name (e.g. "Raydium CLMM").
