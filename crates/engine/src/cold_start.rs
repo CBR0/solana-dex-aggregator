@@ -19,6 +19,50 @@ const BATCH_CONCURRENCY: usize = 100;
 
 const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 
+const MAX_RETRIES: u32 = 6;
+const RETRY_BASE_MS: u64 = 250;
+
+/// True quando o erro é um rate limit/sobrecarga do RPC (a NLN responde 502/503
+/// quando o cold-start a 100 concorrentes estoura a cota). Esses merecem retry
+/// com backoff; erros reais (conta inexistente, etc.) falham imediatamente.
+fn is_retryable(e: &solana_rpc_client_api::client_error::Error) -> bool {
+    use solana_rpc_client_api::client_error::ErrorKind;
+    matches!(
+        e.kind(),
+        ErrorKind::Reqwest(err)
+            if err
+                .status()
+                .map(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
+                .unwrap_or(false)
+    )
+}
+
+/// getMultipleAccounts com retry exponencial em 429/502/503/504. Retorna `None`
+/// quando as tentativas esgotam — o caller segue sem o batch (a resiliência do
+/// cold-start é por etapa, e os pools sem dados live simplesmente não validam).
+async fn fetch_accounts_retry<T, F, Fut>(make: F) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, solana_rpc_client_api::client_error::Error>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match make().await {
+            Ok(v) => return Some(v),
+            Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                let delay = RETRY_BASE_MS << attempt.min(6);
+                eprintln!("[cold_start] retry {attempt}/{MAX_RETRIES} em {delay}ms: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Err(e) => {
+                eprintln!("[cold_start] batch error: {e}");
+                return None;
+            }
+        }
+    }
+}
+
 /// Fetch all vault accounts from the registry and store them in the AccountStore.
 pub async fn fetch_all_vaults(
     rpc: &RpcClient,
@@ -46,32 +90,32 @@ pub async fn fetch_all_vaults(
         let futures: Vec<_> = window
             .iter()
             .map(|(_, chunk)| {
-                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+                fetch_accounts_retry(|| {
+                    rpc.get_multiple_accounts_with_commitment(
+                        chunk,
+                        CommitmentConfig::confirmed(),
+                    )
+                })
             })
             .collect();
         let results = join_all(futures).await;
 
         for ((_, chunk), result) in window.iter().zip(results) {
-            match result {
-                Ok(response) => {
-                    // Stamp with the real context slot so the store's slot
-                    // guard can order these writes against streamed updates.
-                    let slot = response.context.slot;
-                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
-                        if let Some(account) = maybe_account {
-                            store.upsert(
-                                *pubkey,
-                                account.data,
-                                account.owner,
-                                account.lamports,
-                                slot,
-                            );
-                            fetched += 1;
-                        }
+            if let Some(response) = result {
+                // Stamp with the real context slot so the store's slot
+                // guard can order these writes against streamed updates.
+                let slot = response.context.slot;
+                for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
+                    if let Some(account) = maybe_account {
+                        store.upsert(
+                            *pubkey,
+                            account.data,
+                            account.owner,
+                            account.lamports,
+                            slot,
+                        );
+                        fetched += 1;
                     }
-                }
-                Err(e) => {
-                    eprintln!("[cold_start] vault batch error: {e}");
                 }
             }
         }
@@ -150,32 +194,32 @@ pub async fn fetch_tick_arrays(
         let futures: Vec<_> = window
             .iter()
             .map(|chunk| {
-                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+                fetch_accounts_retry(|| {
+                    rpc.get_multiple_accounts_with_commitment(
+                        chunk,
+                        CommitmentConfig::confirmed(),
+                    )
+                })
             })
             .collect();
         let results = join_all(futures).await;
 
         for (chunk, result) in window.iter().zip(results) {
-            match result {
-                Ok(response) => {
-                    // Real context slot — lets the store's slot guard order
-                    // these writes against streamed updates.
-                    let slot = response.context.slot;
-                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
-                        if let Some(account) = maybe_account {
-                            store.upsert(
-                                *pubkey,
-                                account.data,
-                                account.owner,
-                                account.lamports,
-                                slot,
-                            );
-                            fetched += 1;
-                        }
+            if let Some(response) = result {
+                // Real context slot — lets the store's slot guard order
+                // these writes against streamed updates.
+                let slot = response.context.slot;
+                for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
+                    if let Some(account) = maybe_account {
+                        store.upsert(
+                            *pubkey,
+                            account.data,
+                            account.owner,
+                            account.lamports,
+                            slot,
+                        );
+                        fetched += 1;
                     }
-                }
-                Err(e) => {
-                    eprintln!("[cold_start] tick array batch error: {e}");
                 }
             }
         }
@@ -246,32 +290,32 @@ pub async fn fetch_dlmm_bin_arrays(
         let futures: Vec<_> = window
             .iter()
             .map(|chunk| {
-                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+                fetch_accounts_retry(|| {
+                    rpc.get_multiple_accounts_with_commitment(
+                        chunk,
+                        CommitmentConfig::confirmed(),
+                    )
+                })
             })
             .collect();
         let results = join_all(futures).await;
 
         for (chunk, result) in window.iter().zip(results) {
-            match result {
-                Ok(response) => {
-                    // Real context slot — lets the store's slot guard order
-                    // these writes against streamed updates.
-                    let slot = response.context.slot;
-                    for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
-                        if let Some(account) = maybe_account {
-                            store.upsert(
-                                *pubkey,
-                                account.data,
-                                account.owner,
-                                account.lamports,
-                                slot,
-                            );
-                            fetched += 1;
-                        }
+            if let Some(response) = result {
+                // Real context slot — lets the store's slot guard order
+                // these writes against streamed updates.
+                let slot = response.context.slot;
+                for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
+                    if let Some(account) = maybe_account {
+                        store.upsert(
+                            *pubkey,
+                            account.data,
+                            account.owner,
+                            account.lamports,
+                            slot,
+                        );
+                        fetched += 1;
                     }
-                }
-                Err(e) => {
-                    eprintln!("[cold_start] DLMM bin array batch error: {e}");
                 }
             }
         }
@@ -584,12 +628,17 @@ async fn fetch_batch_into_store(rpc: &RpcClient, store: &AccountStore, keys: &[P
         let futures: Vec<_> = window
             .iter()
             .map(|chunk| {
-                rpc.get_multiple_accounts_with_commitment(chunk, CommitmentConfig::confirmed())
+                fetch_accounts_retry(|| {
+                    rpc.get_multiple_accounts_with_commitment(
+                        chunk,
+                        CommitmentConfig::confirmed(),
+                    )
+                })
             })
             .collect();
         let results = join_all(futures).await;
         for (chunk, result) in window.iter().zip(results) {
-            if let Ok(response) = result {
+            if let Some(response) = result {
                 let slot = response.context.slot;
                 for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
                     if let Some(account) = maybe_account {
