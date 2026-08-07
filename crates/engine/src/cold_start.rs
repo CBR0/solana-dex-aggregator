@@ -15,7 +15,9 @@ use crate::account_store::AccountStore;
 use crate::pool_registry::PoolRegistry;
 
 const BATCH_SIZE: usize = 100;
-const BATCH_CONCURRENCY: usize = 100;
+// 100 concorrentes estrangula a NLN (503 em toda janela — o loader usa 20 e
+// funciona). 20 mantém o cold-start veloz sem estourar a cota de requests.
+const BATCH_CONCURRENCY: usize = 20;
 
 const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 
@@ -51,7 +53,9 @@ where
             Ok(v) => return Some(v),
             Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
                 attempt += 1;
-                let delay = RETRY_BASE_MS << attempt.min(6);
+                // Backoff exponencial com jitter determinístico (quebra a
+                // sincronização dos batches quando todos falham na mesma janela).
+                let delay = (RETRY_BASE_MS << attempt.min(6)) + (attempt as u64 * 53) % 100;
                 eprintln!("[cold_start] retry {attempt}/{MAX_RETRIES} em {delay}ms: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
