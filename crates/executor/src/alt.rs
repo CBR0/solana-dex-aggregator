@@ -19,7 +19,7 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::message::AddressLookupTableAccount;
-use solana_sdk::signature::Signer;
+use solana_sdk::signature::{Keypair, Signer};
 
 use solroute_core::GenericError;
 
@@ -77,7 +77,7 @@ pub async fn fetch_lookup_table(
 /// [`fetch_lookup_table`].
 pub async fn create_and_extend_lookup_table(
     rpc: &RpcClient,
-    payer: &dyn Signer,
+    payer: &Keypair,
     addresses: &[Pubkey],
 ) -> Result<AddressLookupTableAccount, GenericError> {
     let authority = payer.pubkey();

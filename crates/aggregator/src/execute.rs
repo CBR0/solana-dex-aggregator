@@ -11,7 +11,7 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::message::AddressLookupTableAccount;
-use solana_sdk::signature::{Signature, Signer};
+use solana_sdk::signature::{Keypair, Signature, Signer};
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 
 use solroute_core::{GenericError, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
@@ -215,7 +215,7 @@ pub async fn execute_route(
     rpc: &RpcClient,
     index: &PoolIndex,
     route: &Route,
-    payer: &dyn Signer,
+    payer: &Keypair,
     slippage_bps: u64,
     compute_unit_limit: u32,
     compute_unit_price_micro_lamports: u64,
