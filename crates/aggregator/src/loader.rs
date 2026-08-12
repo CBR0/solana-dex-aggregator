@@ -878,7 +878,7 @@ impl PoolLoader {
         let k = (self.max_pools_per_dex * 10).max(200);
         scored.truncate(k);
         println!(
-            "[cache] {dex}: {n} candidatos (embedded, de {total_pools} pools) — buscando vaults reais…",
+            "[cache] {dex}: {n} candidatos (score), de {total_pools} pools — buscando vaults reais…",
             n = scored.len()
         );
         if scored.is_empty() {
