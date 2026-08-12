@@ -368,6 +368,24 @@ impl Market for RaydiumClmmMarket {
         let live_pool: Option<RaydiumCLMMPool> = pool_data
             .filter(|d| d.len() > 8)
             .and_then(|d| RaydiumCLMMPool::deserialize(&mut &d[8..]).ok());
+
+        // Frescor: sem pool account live no store, o quote usa o struct
+        // cacheado (sqrt de quando o cache foi construído). Se o preço
+        // implícito pela sqrt divergir > MAX_PRICE_FRESHNESS_FACTOR do preço
+        // dos vaults (frescos via cold-start/stream), os dados estão stale —
+        // recusa o quote (só avalia quando dá pra comparar os dois lados).
+        if live_pool.is_none() {
+            if let Some(factor) = solroute_core::market_price_freshness_factor(
+                self,
+                quote_vault_balance,
+                base_vault_balance,
+            ) {
+                if factor > solroute_core::MAX_PRICE_FRESHNESS_FACTOR {
+                    return Err("CLMM price stale (sqrt vs vaults)".into());
+                }
+            }
+        }
+
         let pool = live_pool.as_ref().unwrap_or(&self.pool);
 
         let Ok(pool_pubkey) = self.pool_address.parse::<Pubkey>() else {

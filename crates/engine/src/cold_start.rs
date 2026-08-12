@@ -134,6 +134,32 @@ pub async fn fetch_all_vaults(
     println!("[cold_start] vaults done: {fetched}/{total} stored");
 }
 
+/// Fetch the POOL account for every cached pool into the store.
+///
+/// Sem isso, pools quietas (que não negociam após o boot) ficam sem pool
+/// account no store — o stream gRPC só entrega updates de pools que trocam,
+/// e o cold-start só buscava vaults/tick arrays. Nesse caso o quote de
+/// CLMM/Whirlpool/V2/DLMM cai no struct CACHEADO (sqrt de quando o cache foi
+/// construído), produzindo preços stale. Com o pool account fresco no boot, o
+/// fallback para dado stale desaparece (o stream mantém os ativos frescos).
+pub async fn fetch_pool_accounts(
+    rpc: &RpcClient,
+    registry: &PoolRegistry,
+    store: &AccountStore,
+) {
+    let pool_keys: Vec<Pubkey> = registry
+        .iter_pools()
+        .filter_map(|(addr, _)| addr.parse().ok())
+        .collect();
+    let total = pool_keys.len();
+    if total == 0 {
+        return;
+    }
+    println!("[cold_start] fetching {total} pool accounts");
+    let fetched = fetch_batch_into_store(rpc, store, &pool_keys).await;
+    println!("[cold_start] pool accounts: {fetched}/{total} stored");
+}
+
 /// Fetch CLMM tick arrays by deriving PDAs from each pool's bitmap, then
 /// batch-fetching with getMultipleAccounts. Replaces the previous single-GPA
 /// approach which failed on large response payloads.
@@ -666,6 +692,10 @@ pub async fn cold_start(
 
     // 1. Vault balances first — everything else depends on these.
     fetch_all_vaults(rpc, registry, store).await;
+
+    // 1b. Pool accounts (sqrt/liquidity) — sem isso pools quietas caem no
+    // struct cacheado stale (ver fetch_pool_accounts).
+    fetch_pool_accounts(rpc, registry, store).await;
 
     // 2. Bitmap extensions (fast, ~43 accounts).
     fetch_bitmap_extensions(rpc, registry, store).await;

@@ -140,6 +140,70 @@ pub fn calculate_price_impact_bps(pre_swap_price: f64, post_swap_price: f64) -> 
     (impact * 10000.0) as u64
 }
 
+// ============================================================================
+// Price freshness (sqrt-implied vs vault-balance-implied)
+// ============================================================================
+
+/// Tolerância máxima de frescor para pools que precificam no pool account
+/// (Raydium CLMM, Orca Whirlpool): o preço implícito pela sqrt_price não pode
+/// divergir dos balanços reais dos vaults por mais de `MAX_PRICE_FRESHNESS_FACTOR`
+/// (fator >= 1; 2 = 2x de diferença).
+///
+/// Valor GROSSO (50x) de propósito: para CLMM/Whirlpool a razão dos vaults
+/// legitimamente diverge do spot por geometria de liquidez concentrada
+/// (posição fora do centro do range — observado até ~15x em pools reais), então
+/// um limiar apertado rejeitaria pools saudáveis. O objetivo aqui é só pegar o
+/// caso patológico — pool account cacheado de outra era de preço (fator 1e6+) —
+/// quando o quote cai no struct cacheado (fallback defensivo). O fix real de
+/// frescor é o cold-start buscar os pool accounts (o stream cobre os ativos).
+pub const MAX_PRICE_FRESHNESS_FACTOR: f64 = 50.0;
+
+/// Preço implícito (quote por base, humano) a partir dos balanços de vault.
+/// `None` quando qualquer balanço é zero (sem dados para inferir preço).
+pub fn vault_implied_price(
+    quote_balance: u64,
+    base_balance: u64,
+    quote_decimals: u8,
+    base_decimals: u8,
+) -> Option<f64> {
+    if quote_balance == 0 || base_balance == 0 {
+        return None;
+    }
+    let q = quote_balance as f64 / 10f64.powi(quote_decimals as i32);
+    let b = base_balance as f64 / 10f64.powi(base_decimals as i32);
+    Some(q / b)
+}
+
+/// Fator de divergência entre dois preços: `max(p/q, q/p)`. Sempre >= 1
+/// (1 = idênticos, 2 = 2x de diferença). `None` se algum preço for inválido
+/// (<= 0 ou não finito) — o chamador não deve tratar como stale nesse caso.
+pub fn price_divergence_factor(p: f64, q: f64) -> Option<f64> {
+    if !p.is_finite() || !q.is_finite() || p <= 0.0 || q <= 0.0 {
+        return None;
+    }
+    Some((p / q).max(q / p))
+}
+
+/// Fator de frescor de um market: quanto o preço implícito pela fonte de
+/// preço do market (pool account / dados cacheados) diverge do preço dos
+/// balanços de vault passados. `None` quando não dá para comparar (algum
+/// lado indisponível) — o chamador NÃO deve tratar como stale nesse caso.
+pub fn market_price_freshness_factor(
+    market: &dyn Market,
+    quote_vault_balance: u64,
+    base_vault_balance: u64,
+) -> Option<f64> {
+    let fin = market.financials().ok()?;
+    let p_implied = market.current_price().ok()?;
+    let p_vaults = vault_implied_price(
+        quote_vault_balance,
+        base_vault_balance,
+        fin.quote_decimals,
+        fin.base_decimals,
+    )?;
+    price_divergence_factor(p_implied, p_vaults)
+}
+
 /// Standard AMM constant product formula: x * y = k.
 pub fn constant_product_swap(
     reserve_in: u64,
@@ -176,5 +240,36 @@ pub trait AccountDataProvider: Send + Sync {
     /// Slot 0 means "age unknown" — callers must not treat it as stale.
     fn account_data_with_slot(&self, pubkey: &Pubkey) -> Option<(Vec<u8>, u64)> {
         self.pool_account_data(pubkey).map(|d| (d, 0))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_divergence_factor_math() {
+        // Idênticos -> 1.
+        assert_eq!(price_divergence_factor(10.0, 10.0), Some(1.0));
+        // 2x de diferença em qualquer direção -> 2.
+        assert_eq!(price_divergence_factor(2.0, 1.0), Some(2.0));
+        assert_eq!(price_divergence_factor(1.0, 2.0), Some(2.0));
+        // ~50x (limiar de frescor CLMM).
+        assert_eq!(price_divergence_factor(1.0, 50.0), Some(50.0));
+        // Entradas inválidas -> None (não tratar como stale).
+        assert_eq!(price_divergence_factor(0.0, 1.0), None);
+        assert_eq!(price_divergence_factor(-1.0, 1.0), None);
+        assert_eq!(price_divergence_factor(f64::NAN, 1.0), None);
+        assert_eq!(price_divergence_factor(1.0, f64::INFINITY), None);
+    }
+
+    #[test]
+    fn vault_implied_price_math() {
+        // 1.5 SOL por USDC (SOL 9 dec, USDC 6 dec): vault de SOL = 1.5e9,
+        // vault de USDC = 1e6 -> price = 1.5e9/1e9 / (1e6/1e6) = 1.5 / 1.0.
+        let p = vault_implied_price(1_500_000_000, 1_000_000, 9, 6).unwrap();
+        assert!((p - 1.5).abs() < 1e-9, "{p}");
+        // Balanço zero -> None.
+        assert_eq!(vault_implied_price(0, 1_000_000, 9, 6), None);
+        assert_eq!(vault_implied_price(1_000_000, 0, 9, 6), None);
     }
 }
