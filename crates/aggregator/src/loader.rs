@@ -39,11 +39,25 @@ const BALANCE_BATCH_SIZE: usize = 100;
 const BALANCE_CONCURRENCY: usize = 20;
 const DEFAULT_MAX_POOLS_PER_DEX: usize = usize::MAX;
 
-/// Proxy de liquidez embutido no pool account: dois dataSlice GPAs baratos
-/// (um para os mints, um para o campo de liquidez/reservas) permitem rankear
-/// todos os pools de um DEX e manter os top-N mais líquidos em USD sem pagar
-/// o custo de um full load (sem fetch dos vaults).
-struct LiquidityProxy {
+/// Proxy de liquidez para rankear pools por USD sem pagar um full load.
+///
+/// Duas estratégias possíveis:
+/// - `Embedded`: o pool account embute dados de liquidez (L+sqrt, amounts
+///   cacheados) — CLMM, Whirlpool, DAMM V2. Dois dataSlice GPAs baratos
+///   (mints + campo de score) pontuam todos os pools do DEX.
+/// - `VaultBalances`: sem campo embutido, mas o pool account expõe os pubkeys
+///   dos vaults em offsets fixos (V4, DAMM V1, DLMM, Pumpfun). Queries
+///   hub-filtered (memcmp no mint) + getMultipleAccounts nos vaults leem os
+///   balanços reais e pontuam em USD.
+enum LiquidityProxy {
+    /// Score de dados embutidos no pool account (CLMM/Whirlpool/DAMM V2).
+    Embedded(EmbeddedProxy),
+    /// Score por balanços reais dos vaults (V4/DAMM V1/DLMM/Pumpfun).
+    VaultBalances(VaultBalancesProxy),
+}
+
+/// Dados embutidos no pool account (CLMM/Whirlpool/DAMM V2).
+struct EmbeddedProxy {
     /// dataSlice dos 2 mints (64 bytes: mint_0 .. mint_1).
     mints: (usize, usize),
     /// dataSlice do campo de score: CLMM/Whirlpool = L u128 + sqrt_price u128
@@ -58,6 +72,20 @@ struct LiquidityProxy {
     hub_mints: Option<(usize, usize)>,
 }
 
+/// Balanços reais dos vaults (V4/DAMM V1/DLMM/Pumpfun).
+struct VaultBalancesProxy {
+    /// (offset do mint, offset do vault) por lado, relativos ao account data
+    /// (descontam o discriminator). O vault é lido como dataSlice de 32 bytes
+    /// (pubkey do token account) e o balanço vem de getMultipleAccounts.
+    sides: [(usize, usize); 2],
+    /// Deriva o token account real a partir do pubkey embutido (DAMM V1:
+    /// PDA do vault program). None = o pubkey já é o token account.
+    derive: Option<fn(Pubkey) -> Pubkey>,
+    /// Quando o programa tem pools demais para enumerar todos os vaults,
+    /// consulta por hub via memcmp filter (offset dos 2 mints).
+    hub_mints: bool,
+}
+
 // Offsets dos campos nos pool accounts, verificados por teste contra o layout
 // borsh real + accounts de mainnet (ver `crates/aggregator/tests/offset_check.rs`).
 // Descontam o discriminator de 8 bytes (o slice é relativo ao account data).
@@ -67,6 +95,17 @@ const WHIRLPOOL_MINTS_OFFSET: usize = 101; // token_mint_a (struct 93 + 8)
 const WHIRLPOOL_LIQUIDITY_OFFSET: usize = 49; // liquidity u128 (struct 41 + 8)
 const DAMMV2_MINTS_OFFSET: usize = 168; // token_a_mint..b_mint (struct 160 + 8)
 const DAMMV2_AMOUNTS_OFFSET: usize = 680; // token_a_amount u64 + token_b_amount u64
+// Vault-based proxies (offsets relativos ao account data, verificados contra
+// fixtures de mainnet em tests/offset_check.rs). V4 não tem discriminator
+// (struct começa no byte 0); os demais têm 8 bytes de discriminator.
+const V4_MINTS_OFFSET: usize = 400; // base_mint, quote_mint
+const V4_VAULTS_OFFSET: usize = 336; // base_vault, quote_vault
+const DAMMV1_MINTS_OFFSET: usize = 40; // token_a_mint, token_b_mint
+const DAMMV1_VAULTS_OFFSET: usize = 104; // a_vault, b_vault (seeds do PDA)
+const DLMM_MINTS_OFFSET: usize = 88; // token_x_mint, token_y_mint
+const DLMM_VAULTS_OFFSET: usize = 152; // reserve_x, reserve_y (token accounts)
+const PUMPFUN_MINTS_OFFSET: usize = 43; // base_mint, quote_mint
+const PUMPFUN_VAULTS_OFFSET: usize = 139; // pool_base_token_account, pool_quote_token_account
 
 /// Preço aproximado em USD + decimals de tokens "hub" (constantes — servem só
 /// para ranking relativo, não são oráculos).
@@ -154,11 +193,14 @@ fn cached_usd_estimate(pool: CachedPool) -> f64 {
             .unwrap_or(0.0)
     };
     match pool {
+        CachedPool::RaydiumV4 { pool: p, quote_bal, base_bal, .. } => {
+            usd(base_bal, p.base_mint.as_ref()).max(usd(quote_bal, p.quote_mint.as_ref()))
+        }
         CachedPool::RaydiumClmm { pool: p, v0_bal, v1_bal, .. } => {
             usd(v0_bal, p.token_mint_0.as_ref()).max(usd(v1_bal, p.token_mint_1.as_ref()))
         }
-        CachedPool::OrcaWhirlpool { pool: p, a_bal, b_bal, .. } => {
-            usd(a_bal, p.token_mint_a.as_ref()).max(usd(b_bal, p.token_mint_b.as_ref()))
+        CachedPool::MeteoraDAMMV1 { pool: p, a_bal, b_bal, .. } => {
+            usd(a_bal, p.token_a_mint.as_ref()).max(usd(b_bal, p.token_b_mint.as_ref()))
         }
         CachedPool::MeteoraDAMMV2 { pool: p, a_bal, b_bal, .. } => {
             let fresh = |embedded: u64, vault: u64| {
@@ -169,7 +211,13 @@ fn cached_usd_estimate(pool: CachedPool) -> f64 {
             }
             usd(a_bal, p.token_a_mint.as_ref()).max(usd(b_bal, p.token_b_mint.as_ref()))
         }
-        _ => 0.0,
+        CachedPool::MeteoraDLMM { pool: p, rx_bal, ry_bal, .. } => {
+            usd(rx_bal, p.token_x_mint.as_ref()).max(usd(ry_bal, p.token_y_mint.as_ref()))
+        }
+        CachedPool::PumpfunAmm { .. } => 0.0,
+        CachedPool::OrcaWhirlpool { pool: p, a_bal, b_bal, .. } => {
+            usd(a_bal, p.token_mint_a.as_ref()).max(usd(b_bal, p.token_mint_b.as_ref()))
+        }
     }
 }
 
@@ -197,64 +245,80 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
         data_sizes: &[752],
         discriminator: None,
-        liquidity_proxy: None, // reservas nos vaults (sem campo embutido)
+        liquidity_proxy: Some(LiquidityProxy::VaultBalances(VaultBalancesProxy {
+            sides: [(V4_MINTS_OFFSET, V4_VAULTS_OFFSET), (V4_MINTS_OFFSET + 32, V4_VAULTS_OFFSET + 32)],
+            derive: None,
+            hub_mints: true, // 705k pools — sem hub filter o dataSlice GPA estoura
+        })),
     },
     DexDescriptor {
         name: "Raydium CLMM",
         program_id: RAYDIUM_CLMM,
         data_sizes: &[1544],
         discriminator: Some(DISC_POOL_STATE),
-        liquidity_proxy: Some(LiquidityProxy {
+        liquidity_proxy: Some(LiquidityProxy::Embedded(EmbeddedProxy {
             mints: (CLMM_MINTS_OFFSET, 64),
             data: (CLMM_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price_x64 u128
             score: score_liquidity_usd,
             hub_mints: None,
-        }),
+        })),
     },
     DexDescriptor {
         name: "Meteora DAMM V1",
         program_id: METEORA_DYNAMIC_AMM,
         data_sizes: &[944],
         discriminator: Some(DISC_POOL),
-        liquidity_proxy: None, // sem campo de liquidez no pool account
+        liquidity_proxy: Some(LiquidityProxy::VaultBalances(VaultBalancesProxy {
+            sides: [(DAMMV1_MINTS_OFFSET, DAMMV1_VAULTS_OFFSET), (DAMMV1_MINTS_OFFSET + 32, DAMMV1_VAULTS_OFFSET + 32)],
+            derive: Some(|v| derive_token_vault_address(v).0),
+            hub_mints: false, // 16k pools — dataSlice GPA ok
+        })),
     },
     DexDescriptor {
         name: "Meteora DAMM V2",
         program_id: METEORA_DYNAMIC_AMM_V2,
         data_sizes: &[1112],
         discriminator: Some(DISC_POOL),
-        liquidity_proxy: Some(LiquidityProxy {
+        liquidity_proxy: Some(LiquidityProxy::Embedded(EmbeddedProxy {
             mints: (DAMMV2_MINTS_OFFSET, 64),
             data: (DAMMV2_AMOUNTS_OFFSET, 16), // token_a_amount + token_b_amount u64
             score: score_amounts_usd,
             hub_mints: Some((DAMMV2_MINTS_OFFSET, DAMMV2_MINTS_OFFSET + 32)),
-        }),
+        })),
     },
     DexDescriptor {
         name: "Meteora DLMM",
         program_id: METEORA_DYNAMIC_LMM,
         data_sizes: &[904],
         discriminator: Some(DISC_LB_PAIR),
-        liquidity_proxy: None, // liquidez distribuída nos bin arrays
+        liquidity_proxy: Some(LiquidityProxy::VaultBalances(VaultBalancesProxy {
+            sides: [(DLMM_MINTS_OFFSET, DLMM_VAULTS_OFFSET), (DLMM_MINTS_OFFSET + 32, DLMM_VAULTS_OFFSET + 32)],
+            derive: None,
+            hub_mints: false, // 153k pools — dataSlice GPA no limite; memcmp hub ajuda
+        })),
     },
     DexDescriptor {
         name: "Pumpfun AMM",
         program_id: PUMPFUN_AMM_PROGRAM,
         data_sizes: &[],
         discriminator: Some(DISC_POOL),
-        liquidity_proxy: None, // bonding curve em conta separada
+        liquidity_proxy: Some(LiquidityProxy::VaultBalances(VaultBalancesProxy {
+            sides: [(PUMPFUN_MINTS_OFFSET, PUMPFUN_VAULTS_OFFSET), (PUMPFUN_MINTS_OFFSET + 32, PUMPFUN_VAULTS_OFFSET + 32)],
+            derive: None,
+            hub_mints: false,
+        })),
     },
     DexDescriptor {
         name: "Orca Whirlpool",
         program_id: ORCA_WHIRLPOOL_PROGRAM,
         data_sizes: &[WHIRLPOOL_LEN],
         discriminator: Some(DISC_WHIRLPOOL),
-        liquidity_proxy: Some(LiquidityProxy {
+        liquidity_proxy: Some(LiquidityProxy::Embedded(EmbeddedProxy {
             mints: (WHIRLPOOL_MINTS_OFFSET, 112), // token_mint_a + token_mint_b
             data: (WHIRLPOOL_LIQUIDITY_OFFSET, 32), // L u128 + sqrt_price u128
             score: score_liquidity_usd,
             hub_mints: None,
-        }),
+        })),
     },
 ];
 
@@ -432,6 +496,229 @@ impl PoolLoader {
         Ok(entries)
     }
 
+    /// Score USD por dataSlice GPAs dos dados embutidos (CLMM/Whirlpool): dois
+    /// GPAs baratos (mints + campo de score) pontuam todos os pools do DEX.
+    /// Viável quando a resposta do GPA cabe no RPC (programas < ~100k pools).
+    async fn score_embedded_gpa(
+        &self,
+        desc: &DexDescriptor,
+        proxy: &EmbeddedProxy,
+    ) -> Result<Vec<(f64, Pubkey)>, GenericError> {
+        let program = Pubkey::from_str_const(desc.program_id);
+        let mut filters = Vec::new();
+        if let Some(&size) = desc.data_sizes.first() {
+            if size > 0 {
+                filters.push(RpcFilterType::DataSize(size));
+            }
+        }
+        if let Some(disc) = &desc.discriminator {
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+        }
+        let gpa = |offset: usize, length: usize| {
+            let config = RpcProgramAccountsConfig {
+                filters: Some(filters.clone()),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                        offset,
+                        length,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            self.rpc.get_program_accounts_with_config(&program, config)
+        };
+        let (mints_gpa, data_gpa) = tokio::join!(
+            gpa(proxy.mints.0, proxy.mints.1),
+            gpa(proxy.data.0, proxy.data.1),
+        );
+        let (mints_gpa, data_gpa) = (mints_gpa?, data_gpa?);
+        let mints_map: std::collections::HashMap<Pubkey, Vec<u8>> =
+            mints_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
+        let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(data_gpa.len());
+        for (pk, acc) in data_gpa {
+            if let Some(mints) = mints_map.get(&pk) {
+                if mints.len() >= proxy.mints.1 && acc.data.len() >= proxy.data.1 {
+                    scored.push(((proxy.score)(mints, &acc.data), pk));
+                }
+            }
+        }
+        Ok(scored)
+    }
+
+    /// Score USD por balanços reais dos vaults (V4, DAMM V1, DLMM, Pumpfun):
+    /// lê os pubkeys dos vaults e os mints do pool account, e busca os balanços
+    /// reais via getMultipleAccounts. Pools com mint hub em algum lado pontuam
+    /// pelo balanço real desse vault × preço.
+    ///
+    /// Modos:
+    /// - `hub_mints: true` (V4, 705k pools): memcmp filter por hub nos mints +
+    ///   dataSlice só do vault (32B) — resposta bounded; o preço do hub vem do
+    ///   próprio loop. Mints e vaults não precisam ser contíguos.
+    /// - `hub_mints: false` (DAMM V1, DLMM, Pumpfun): dataSlice GPA de mints +
+    ///   vaults contíguos (64B + 64B por pool) cobre o programa inteiro.
+    async fn score_vault_balances(
+        &self,
+        desc: &DexDescriptor,
+        proxy: &VaultBalancesProxy,
+        cb: &ProgressCallback,
+    ) -> Result<Vec<(f64, Pubkey)>, GenericError> {
+        use std::collections::HashMap;
+        use std::str::FromStr;
+
+        const HUBS: &[(&str, f64, u8)] = &[
+            ("So11111111111111111111111111111111111111112", 150.0, 9),
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 1.0, 6),
+            ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 1.0, 6),
+            ("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", 175.0, 9),
+            ("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", 165.0, 9),
+            ("bSo13r4TkiE4KumL71LsHTPpL2euBYLPxVMh7aCVueG", 160.0, 9),
+            ("jupSoLaHXQiZZTSpEWRVWmKVpsaQoptjT5z6q1ULjxa", 150.0, 9),
+            ("DSRnp2rGZgCkCw7jMYZ7bZkBYdK7JZaFgzYg5MbcGayL", 1.0, 9),
+            ("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZdbHsDbw2Gf", 1.0, 6),
+            ("zebeczgi5fSEtbpfQ5Zbr7njtGVfbwF1BGuTk1UTpU", 1.1, 6),
+        ];
+
+        let dex = desc.name;
+        let program = Pubkey::from_str_const(desc.program_id);
+        let mut filters = Vec::new();
+        if let Some(&size) = desc.data_sizes.first() {
+            if size > 0 {
+                filters.push(RpcFilterType::DataSize(size));
+            }
+        }
+        if let Some(disc) = &desc.discriminator {
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+        }
+
+        // pool -> por lado: (vault pubkey, preço/decimals do hub caso o mint
+        // desse lado seja hub). O score soma só os lados com hub.
+        let mut pools: HashMap<Pubkey, [Option<(Pubkey, f64, u8)>; 2]> = HashMap::new();
+        let mut any_ok = false;
+
+        if proxy.hub_mints {
+            for (hub_b58, price, decimals) in HUBS {
+                let Ok(hub) = Pubkey::from_str(hub_b58) else { continue };
+                for (side, (mint_off, vault_off)) in proxy.sides.iter().enumerate() {
+                    let mut f = filters.clone();
+                    f.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(*mint_off, hub.as_ref().to_vec())));
+                    // dataSlice: só o pubkey do vault (32B) — memcmp já filtra
+                    // pelo mint hub; o preço vem do loop.
+                    let config = RpcProgramAccountsConfig {
+                        filters: Some(f),
+                        account_config: RpcAccountInfoConfig {
+                            encoding: Some(UiAccountEncoding::Base64),
+                            commitment: Some(CommitmentConfig::confirmed()),
+                            data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                                offset: *vault_off,
+                                length: 32,
+                            }),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    match self.rpc.get_program_accounts_with_config(&program, config).await {
+                        Ok(keyed) => {
+                            any_ok = true;
+                            for (pk, acc) in keyed {
+                                if acc.data.len() < 32 { continue; }
+                                let v_raw = &acc.data[..32];
+                                let vault = proxy
+                                    .derive
+                                    .map(|f| f(Pubkey::try_from(v_raw).unwrap_or_default()))
+                                    .unwrap_or_else(|| Pubkey::try_from(v_raw).unwrap_or_default());
+                                pools.entry(pk).or_insert([None; 2])[side] =
+                                    Some((vault, *price, *decimals));
+                            }
+                        }
+                        Err(e) => println!("[cache] {dex}: query hub {hub_b58} falhou ({e})"),
+                    }
+                }
+            }
+        } else {
+            // GPA único de mints (64B) + vaults (64B) contíguos, programa inteiro.
+            let gpa = |offset: usize, length: usize| {
+                let config = RpcProgramAccountsConfig {
+                    filters: Some(filters.clone()),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        data_slice: Some(solana_account_decoder_client_types::UiDataSliceConfig {
+                            offset,
+                            length,
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                self.rpc.get_program_accounts_with_config(&program, config)
+            };
+            let (mints_gpa, vaults_gpa) = tokio::join!(
+                gpa(proxy.sides[0].0, 64),
+                gpa(proxy.sides[0].1, 64),
+            );
+            let (mints_gpa, vaults_gpa) = (mints_gpa?, vaults_gpa?);
+            any_ok = true;
+            let vaults_map: HashMap<Pubkey, Vec<u8>> =
+                vaults_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
+            for (pk, acc) in mints_gpa {
+                let Some(vaults) = vaults_map.get(&pk) else { continue };
+                if acc.data.len() < 64 || vaults.len() < 64 { continue; }
+                let mut entry: [Option<(Pubkey, f64, u8)>; 2] = [None; 2];
+                for side in 0..2 {
+                    let mint = &acc.data[side * 32..side * 32 + 32];
+                    let raw = &vaults[side * 32..side * 32 + 32];
+                    let vault = proxy
+                        .derive
+                        .map(|f| f(Pubkey::try_from(raw).unwrap_or_default()))
+                        .unwrap_or_else(|| Pubkey::try_from(raw).unwrap_or_default());
+                    if let Some((price, decimals)) = hub_usd(mint) {
+                        entry[side] = Some((vault, price, decimals));
+                    }
+                }
+                pools.insert(pk, entry);
+            }
+        }
+
+        if !any_ok {
+            return Err("todas as queries de score falharam".into());
+        }
+        if pools.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Busca balanços reais dos vaults (getMultipleAccounts em batches).
+        // Só dos vaults cujo lado tem hub — os demais não pontuam.
+        let mut order: Vec<(Pubkey, usize)> = Vec::new();
+        for (pk, sides) in &pools {
+            for (i, s) in sides.iter().enumerate() {
+                if s.is_some() {
+                    order.push((*pk, i));
+                }
+            }
+        }
+        let addrs: Vec<Pubkey> = order
+            .iter()
+            .map(|(pk, i)| pools[pk][*i].as_ref().unwrap().0)
+            .collect();
+        let balances = self.batch_fetch_balances(&addrs, dex, cb).await?;
+
+        let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(pools.len());
+        let mut balance_idx = 0;
+        for (pk, sides) in pools {
+            let mut usd = 0.0;
+            for s in sides.iter().flatten() {
+                let bal = balances[balance_idx];
+                balance_idx += 1;
+                usd += bal as f64 * s.1 / 10f64.powi(s.2 as i32);
+            }
+            scored.push((usd, pk));
+        }
+        Ok(scored)
+    }
+
     /// Score USD por consultas hub-filtered: para cada hub do whitelist, duas
     /// queries (mint_a == hub e mint_b == hub) com dataSlice só do campo de
     /// score. Respostas limitadas ao subconjunto do hub — viável quando o
@@ -440,7 +727,7 @@ impl PoolLoader {
     async fn score_hub_filtered(
         &self,
         desc: &DexDescriptor,
-        proxy: &LiquidityProxy,
+        proxy: &EmbeddedProxy,
         off_a: usize,
         off_b: usize,
     ) -> Result<Vec<(f64, Pubkey)>, GenericError> {
@@ -534,8 +821,9 @@ impl PoolLoader {
     /// busca os vaults), re-rankeando pelo maior balanço real — o mesmo critério
     /// do cache-shrink. Pools drenados (embedded grande, vaults ~0) caem fora.
     ///
-    /// DEXs sem proxy (V4, DAMM V1, DLMM, Pumpfun — liquidez nos vaults) caem
-    /// no early-stop arbitrário.
+    /// Todos os DEXs têm proxy hoje: Embedded (CLMM, Whirlpool, DAMM V2) ou
+    /// VaultBalances (V4, DAMM V1, DLMM, Pumpfun — balanços reais dos vaults).
+    /// Se o proxy falhar, cai no early-stop arbitrário como fallback.
     async fn load_dex_top(
         &self,
         desc: &DexDescriptor,
@@ -548,68 +836,39 @@ impl PoolLoader {
             return self.finish_dex(desc, cb, raw).await;
         };
 
-        // Fase 1: scores embutidos — hub queries (DEXs grandes) ou 2-GPAs.
-        let mut scored: Vec<(f64, Pubkey)> = if let Some((off_a, off_b)) = proxy.hub_mints {
-            match self.score_hub_filtered(desc, proxy, off_a, off_b).await {
-                Ok(s) => s,
-                Err(_) => {
-                    println!("[cache] {dex}: queries por hub falharam — top-N arbitrário (early-stop)");
-                    let raw = self.fetch_dex_raw(desc, cb).await;
-                    return self.finish_dex(desc, cb, raw).await;
-                }
-            }
-        } else {
-            let program = Pubkey::from_str_const(desc.program_id);
-            let mut filters = Vec::new();
-            if let Some(&size) = desc.data_sizes.first() {
-                if size > 0 {
-                    filters.push(RpcFilterType::DataSize(size));
-                }
-            }
-            if let Some(disc) = &desc.discriminator {
-                filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
-            }
-            let gpa = |offset: usize, length: usize| {
-                let config = RpcProgramAccountsConfig {
-                    filters: Some(filters.clone()),
-                    account_config: RpcAccountInfoConfig {
-                        encoding: Some(UiAccountEncoding::Base64),
-                        commitment: Some(CommitmentConfig::confirmed()),
-                        data_slice: Some(
-                            solana_account_decoder_client_types::UiDataSliceConfig {
-                                offset,
-                                length,
-                            },
-                        ),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                self.rpc.get_program_accounts_with_config(&program, config)
-            };
-            let (mints_gpa, data_gpa) = tokio::join!(
-                gpa(proxy.mints.0, proxy.mints.1),
-                gpa(proxy.data.0, proxy.data.1),
-            );
-            let (mints_gpa, data_gpa) = match (mints_gpa, data_gpa) {
-                (Ok(m), Ok(d)) => (m, d),
-                (Err(e), _) | (_, Err(e)) => {
-                    println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
-                    let raw = self.fetch_dex_raw(desc, cb).await;
-                    return self.finish_dex(desc, cb, raw).await;
-                }
-            };
-            let mints_map: std::collections::HashMap<Pubkey, Vec<u8>> =
-                mints_gpa.into_iter().map(|(pk, acc)| (pk, acc.data)).collect();
-            let mut scored: Vec<(f64, Pubkey)> = Vec::with_capacity(data_gpa.len());
-            for (pk, acc) in data_gpa {
-                if let Some(mints) = mints_map.get(&pk) {
-                    if mints.len() >= proxy.mints.1 && acc.data.len() >= proxy.data.1 {
-                        scored.push(((proxy.score)(mints, &acc.data), pk));
+        // Fase 1: scores — hub queries (DEXs grandes) ou dataSlice GPAs.
+        let mut scored: Vec<(f64, Pubkey)> = match proxy {
+            LiquidityProxy::Embedded(proxy) => {
+                if let Some((off_a, off_b)) = proxy.hub_mints {
+                    match self.score_hub_filtered(desc, proxy, off_a, off_b).await {
+                        Ok(s) => s,
+                        Err(_) => {
+                            println!("[cache] {dex}: queries por hub falharam — top-N arbitrário (early-stop)");
+                            let raw = self.fetch_dex_raw(desc, cb).await;
+                            return self.finish_dex(desc, cb, raw).await;
+                        }
+                    }
+                } else {
+                    match self.score_embedded_gpa(desc, proxy).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            println!("[cache] {dex}: dataSlice GPA falhou ({e}) — top-N arbitrário (early-stop)");
+                            let raw = self.fetch_dex_raw(desc, cb).await;
+                            return self.finish_dex(desc, cb, raw).await;
+                        }
                     }
                 }
             }
-            scored
+            LiquidityProxy::VaultBalances(proxy) => {
+                match self.score_vault_balances(desc, proxy, cb).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("[cache] {dex}: score por vaults falhou ({e}) — top-N arbitrário (early-stop)");
+                        let raw = self.fetch_dex_raw(desc, cb).await;
+                        return self.finish_dex(desc, cb, raw).await;
+                    }
+                }
+            }
         };
 
         let total_pools = scored.len();
