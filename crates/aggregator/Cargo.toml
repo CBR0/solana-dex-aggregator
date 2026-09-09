@@ -32,6 +32,8 @@ meteora-damm = { path = "../meteora-damm" }
 meteora-dlmm = { path = "../meteora-dlmm" }
 orca-whirlpool = { path = "../orca-whirlpool" }
 pumpfun-amm = { path = "../pumpfun-amm" }
+bonk = { path = "../bonk" }
+meteora-dbc = { path = "../meteora-dbc" }
 solroute-executor = { path = "../executor" }
 
 # Workspace deps

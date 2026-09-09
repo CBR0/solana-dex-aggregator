@@ -23,7 +23,15 @@ use meteora_damm::{
     MeteoraDAMMV2Pool, METEORA_DYNAMIC_AMM, METEORA_DYNAMIC_AMM_V2,
 };
 use meteora_dlmm::{MeteoraDLMMPool, METEORA_DYNAMIC_LMM};
-use pumpfun_amm::{PumpfunAmmPool, PUMPFUN_AMM_PROGRAM};
+use bonk::{parse_pool_state as parse_bonk_pool, BONK_LAUNCHPAD_PROGRAM};
+use meteora_dbc::{
+    parse_pool_config as parse_dbc_config, parse_virtual_pool, quote::is_tradeable as dbc_tradeable,
+    DISC_VIRTUAL_POOL, METEORA_DBC_PROGRAM,
+};
+use pumpfun_amm::{
+    derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurvePool,
+    PUMPFUN_AMM_PROGRAM,
+};
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
 use orca_whirlpool::{WhirlpoolPool, DISC_WHIRLPOOL, ORCA_WHIRLPOOL_PROGRAM, WHIRLPOOL_LEN};
 use raydium_clmm::{RaydiumCLMMPool, RAYDIUM_CLMM};
@@ -239,7 +247,7 @@ struct DexDescriptor {
     liquidity_proxy: Option<LiquidityProxy>,
 }
 
-const DESCRIPTORS: [DexDescriptor; 7] = [
+const DESCRIPTORS: [DexDescriptor; 9] = [
     DexDescriptor {
         name: "Raydium AMM V4",
         program_id: RAYDIUM_LIQUIDITY_POOL_V4,
@@ -320,6 +328,22 @@ const DESCRIPTORS: [DexDescriptor; 7] = [
             hub_mints: None,
         })),
     },
+    // bonk.fun / Raydium LaunchLab. PoolState shares CLMM's discriminator but
+    // lives under a different program — disc-only (sizes vary by curve type).
+    DexDescriptor {
+        name: "Bonk",
+        program_id: BONK_LAUNCHPAD_PROGRAM,
+        data_sizes: &[],
+        discriminator: Some(DISC_POOL_STATE),
+    },
+    // Meteora Dynamic Bonding Curve. VirtualPool is 424 bytes; disc-only filter
+    // (a transfer-hook pool variant shares the size but not the discriminator).
+    DexDescriptor {
+        name: "Meteora DBC",
+        program_id: METEORA_DBC_PROGRAM,
+        data_sizes: &[],
+        discriminator: Some(DISC_VIRTUAL_POOL),
+    },
 ];
 
 pub struct PoolLoader {
@@ -361,7 +385,7 @@ impl PoolLoader {
     ) -> Result<PoolIndex, GenericError> {
         let mut index = PoolIndex::new();
 
-        let (r0, r1, r2, r3, r4, r5, r6) = tokio::join!(
+        let (r0, r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
             self.load_dex(&DESCRIPTORS[0], progress_cb),
             self.load_dex(&DESCRIPTORS[1], progress_cb),
             self.load_dex(&DESCRIPTORS[2], progress_cb),
@@ -369,9 +393,11 @@ impl PoolLoader {
             self.load_dex(&DESCRIPTORS[4], progress_cb),
             self.load_dex(&DESCRIPTORS[5], progress_cb),
             self.load_dex(&DESCRIPTORS[6], progress_cb),
+            self.load_dex(&DESCRIPTORS[7], progress_cb),
+            self.load_dex(&DESCRIPTORS[8], progress_cb),
         );
 
-        for result in [r0, r1, r2, r3, r4, r5, r6] {
+        for result in [r0, r1, r2, r3, r4, r5, r6, r7, r8] {
             if let Ok(pools) = result {
                 for (addr, entry) in pools {
                     let _ = index.add_pool(addr, entry);
@@ -994,6 +1020,8 @@ impl PoolLoader {
             "Meteora DLMM" => self.build_meteora_dlmm(raw_accounts, cb).await,
             "Pumpfun AMM" => self.build_pumpfun(raw_accounts, cb).await,
             "Orca Whirlpool" => self.build_orca_whirlpool(raw_accounts, cb).await,
+            "Bonk" => self.build_bonk(raw_accounts, cb).await,
+            "Meteora DBC" => self.build_dbc(raw_accounts, cb).await,
             _ => Err(format!("Unknown DEX: {}", desc.name).into()),
         }
     }
@@ -1112,6 +1140,127 @@ impl PoolLoader {
                 cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
             }
         }
+        Ok(entries)
+    }
+
+    async fn build_bonk(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Bonk";
+        let total = accounts.len();
+        let mut entries = Vec::new();
+        for (i, (pubkey, account)) in accounts.iter().enumerate() {
+            if let Some(pool) = parse_bonk_pool(&account.data) {
+                // Only fundraising (on-curve) pools are tradeable here; migrated
+                // ones live on the AMM.
+                if pool.status == bonk::POOL_STATUS_FUND {
+                    entries.push(
+                        CachedPool::Bonk { addr: pubkey.to_string(), pool }.into_pool_entry(),
+                    );
+                }
+            }
+            if (i + 1) % 5000 == 0 || i + 1 == total {
+                cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn build_dbc(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Meteora DBC";
+        // Parse pools, pre-filter migrated (full tradeable check needs the config).
+        let mut pools: Vec<(String, meteora_dbc::VirtualPool)> = Vec::new();
+        for (pubkey, account) in &accounts {
+            if let Some(p) = parse_virtual_pool(&account.data) {
+                if p.is_migrated == 0 && p.migration_progress == 0 {
+                    pools.push((pubkey.to_string(), p));
+                }
+            }
+        }
+        // Configs are shared across many pools — fetch the unique set once.
+        let mut cfg_keys: Vec<Pubkey> = pools.iter().map(|(_, p)| p.config).collect();
+        cfg_keys.sort_unstable_by_key(|k| k.to_bytes());
+        cfg_keys.dedup();
+        cb(progress(dex, LoadPhase::FetchingBalances { done: 0, total: cfg_keys.len() }));
+        let mut configs: std::collections::HashMap<Pubkey, meteora_dbc::PoolConfig> =
+            std::collections::HashMap::new();
+        for chunk in cfg_keys.chunks(BALANCE_BATCH_SIZE) {
+            if let Ok(accs) = self.rpc.get_multiple_accounts(chunk).await {
+                for (k, maybe) in chunk.iter().zip(accs) {
+                    if let Some(a) = maybe.as_ref() {
+                        if let Some(c) = parse_dbc_config(&a.data) {
+                            configs.insert(*k, c);
+                        }
+                    }
+                }
+            }
+        }
+        // Clock for the fee scheduler: slot for activation_type Slot(0), unix
+        // time for Timestamp(1).
+        let current_slot = self.rpc.get_slot().await.unwrap_or(0);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Keep only on-curve tradeable pools (needs the config's migration threshold).
+        let mut entries = Vec::new();
+        for (addr, pool) in pools {
+            if let Some(config) = configs.get(&pool.config) {
+                if dbc_tradeable(&pool, config) {
+                    let current_point = if config.activation_type == 1 { now_unix } else { current_slot };
+                    entries.push(crate::cache::dbc_pool_entry(addr, pool, config.clone(), current_point));
+                }
+            }
+        }
+        cb(progress(dex, LoadPhase::Complete { pool_count: entries.len() }));
+        Ok(entries)
+    }
+
+    /// Load pump.fun bonding curves for a bounded, explicit set of token mints.
+    ///
+    /// The BondingCurve account carries no base mint and its `["bonding-curve",
+    /// mint]` PDA can't be reversed, so curves cannot be enumerated program-wide
+    /// (and `getProgramAccounts` on the pump program is blocked on stock RPCs).
+    /// This resolves each supplied mint's curve PDA, fetches it via
+    /// `getMultipleAccounts`, parses, and keeps only still-trading curves
+    /// (`complete == false`, non-empty SOL reserves). Production discovery of new
+    /// curves is via pump `create`/trade event streaming.
+    pub async fn load_bonding_curves_for_mints(
+        &self,
+        mints: &[Pubkey],
+        cb: &ProgressCallback,
+    ) -> Result<Vec<(String, PoolEntry)>, GenericError> {
+        let dex = "Pumpfun BC";
+        let curves: Vec<Pubkey> = mints.iter().map(derive_bonding_curve_pda).collect();
+        let total = mints.len();
+        cb(progress(dex, LoadPhase::FetchingPools));
+
+        let mut entries = Vec::new();
+        let mut done = 0usize;
+        for (mchunk, cchunk) in mints.chunks(BALANCE_BATCH_SIZE).zip(curves.chunks(BALANCE_BATCH_SIZE)) {
+            let accounts = self.rpc.get_multiple_accounts(cchunk).await.unwrap_or_default();
+            for ((mint, curve), maybe) in mchunk.iter().zip(cchunk).zip(accounts) {
+                if let Some(account) = maybe {
+                    if let Some(bc) = parse_bonding_curve(&account.data) {
+                        // Skip migrated (complete) and dead (empty) curves.
+                        if bc.complete || bc.real_sol_reserves == 0 {
+                            continue;
+                        }
+                        let pool = PumpfunBondingCurvePool {
+                            mint: *mint,
+                            bonding_curve: *curve,
+                            curve: bc,
+                        };
+                        entries.push(
+                            CachedPool::PumpfunBondingCurve { addr: curve.to_string(), pool }
+                                .into_pool_entry(),
+                        );
+                    }
+                }
+            }
+            done += mchunk.len();
+            cb(progress(dex, LoadPhase::BuildingMarkets { done, total }));
+        }
+        cb(progress(dex, LoadPhase::Complete { pool_count: entries.len() }));
         Ok(entries)
     }
 

@@ -1,9 +1,10 @@
 # solroute
 
 A Rust DEX **routing + execution** engine for Solana. Loads pools across 7 DEX
-protocols, finds optimal multi-hop swap routes with live on-chain pricing, and
-builds/simulates/lands the resulting swaps as versioned transactions — all
-without external routing or price APIs.
+protocols **plus three pre-graduation bonding curves** (pump.fun, bonk.fun /
+Raydium LaunchLab, and Meteora DBC), finds optimal multi-hop swap routes with
+live on-chain pricing, and builds/simulates/lands the resulting swaps as
+versioned transactions — all without external routing or price APIs.
 
 Every quote is computed from raw on-chain account bytes using each protocol's
 own swap math. No third-party quote API, no price oracle.
@@ -32,6 +33,21 @@ TRUMP −362.7 bps) the gap is venue coverage, not math error.
 Every row is a **2–3 hop route composed across different protocols** in a single
 swap (e.g. `Whirlpool > DAMM V1 > Raydium CLMM` — three protocols, one route),
 all landing within **±55 bps** of Jupiter with no direct pool for the pair.
+
+### pump.fun bonding curve (pre-graduation)
+
+Beyond the 7 AMM/CLMM venues, solroute quotes and executes on the **pump.fun
+bonding curve** — pre-graduation tokens trading against virtual reserves on
+program `6EF8…F6P`, before they migrate to PumpSwap. Verified live on mainnet:
+
+- **Quoting matches Jupiter to the unit (+0.0 bps)** across live curves — same
+  virtual-reserve constant product and 95 + 30 bps (protocol + creator) fee.
+- **Buy `simulateTransaction` PASS** on live curves (~95k CU) — real program
+  acceptance of the full account layout, PDAs (`bonding_curve`,
+  `creator_vault`, `bonding_curve_v2`, volume accumulators) and args.
+
+Reproduce: `RPC_URL=… cargo run -p solroute-aggregator --bin bc_probe -- <mint>`
+(quote) and `--bin bc_sim -- <mint> <funded_payer>` (simulate a buy).
 
 ### On-chain simulation
 
@@ -82,6 +98,15 @@ DAMM V1 depeg remaining-accounts, one stale hot-vault), not quoting errors.
 | Meteora DLMM | ✅ | ✅ | ported bin traversal (Meteora dlmm-sdk) |
 | Pumpfun AMM (PumpSwap) | ✅ | ✅ | bonding-curve AMM |
 | Orca Whirlpools | ✅ | ✅ | official `orca_whirlpools_core` |
+| pump.fun bonding curve (pre-bond) | ✅ | ✅ | virtual-reserve CP + 95/30 fee (=Jupiter +0.0 bps) |
+| bonk.fun / Raydium LaunchLab (pre-bond) | ✅ | ✅¹ | virtual+real CP + 125 bps (sim-bounded ≤2%) |
+| Meteora DBC (pre-bond) | ✅ | ✅ | sqrt-price curve + fee scheduler + dynamic fee (sim-verified <0.1%) |
+
+¹ bonk routing/quoting is verified live (1.27M pools enumerable; buy sim PASSes,
+bounding the quote within 2% of actual). Execution: the current LaunchLab program
+needs two fee-vault remaining accounts that aren't derivable from public account
+data — the aggregator observes them from a recent swap on the pool at execution
+time (`execute::observe_bonk_fee_vaults`). Buy sim PASSes end-to-end.
 
 Concentrated/bin/vault swaps (CLMM/Whirlpool tick arrays, DLMM bin arrays, DAMM
 V1 dynamic vaults) build their variable account sets from pool state; CLMM/DLMM
@@ -302,8 +327,14 @@ cargo build --release --bin solroute-engine       # Engine
   it does not yet split a single trade across multiple pools (the technique
   large aggregators use to cut slippage on big sizes). This is why very large
   swaps can lose bps to Jupiter even when the per-pool math is exact.
-- **7 venues.** Missing e.g. Raydium CPMM, pump.fun bonding curve, Meteora DBC,
-  Lifinity, Phoenix, OpenBook — each new venue is a new `Market` crate.
+- **10 venues.** Missing e.g. Raydium CPMM, Lifinity, Phoenix, OpenBook — each
+  new venue is a new `Market` crate.
+- **pump.fun BC ingestion is mint-driven.** The BondingCurve account carries no
+  base mint and its PDA can't be reversed, so curves can't be enumerated via
+  `getProgramAccounts` (also blocked on stock RPCs). solroute resolves curves
+  from a supplied mint list (`load_bonding_curves_for_mints`); production
+  auto-discovery of new launches is via pump `create`/trade event streaming
+  (not yet wired). Native-SOL curves only; USDC-quoted (V2) curves are skipped.
 - **Multi-hop amount chaining** uses the router's quoted per-hop amounts with a
   safety haircut on intermediate inputs (a hop can only spend what the previous
   hop actually produced on-chain); a production version would quote the whole
@@ -322,6 +353,8 @@ cargo build --release --bin solroute-engine       # Engine
 - [Meteora DLMM](https://github.com/MeteoraAg/dlmm-sdk)
 - [Orca Whirlpools](https://github.com/orca-so/whirlpools)
 - [Pumpfun AMM](https://solscan.io/account/pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA)
+- [pump.fun program / IDL](https://github.com/pump-fun/pump-public-docs) (bonding curve `6EF8…F6P`)
+- [FnZero sol-trade-sdk](https://github.com/0xfnzero/sol-trade-sdk) — reference for pump.fun BC + other pre-bond math/instructions
 
 ## License
 

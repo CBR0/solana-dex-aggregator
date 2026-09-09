@@ -15,7 +15,11 @@ use solroute_core::{GenericError, Market};
 
 use meteora_damm::{MeteoraDAMMMarket, MeteoraDAMMPool, MeteoraDAMMV2Market, MeteoraDAMMV2Pool};
 use meteora_dlmm::{MeteoraDlmmMarket, MeteoraDLMMPool};
-use pumpfun_amm::{PumpfunAmmMarket, PumpfunAmmPool};
+use bonk::{BonkMarket, BonkPoolState};
+use meteora_dbc::{DbcMarket, PoolConfig as DbcConfig, VirtualPool as DbcVirtualPool};
+use pumpfun_amm::{
+    PumpfunAmmMarket, PumpfunAmmPool, PumpfunBondingCurveMarket, PumpfunBondingCurvePool,
+};
 use raydium_amm_v4::{RaydiumAmmV4Market, RaydiumAMMV4};
 use orca_whirlpool::{OrcaWhirlpoolMarket, WhirlpoolPool};
 use raydium_clmm::{RaydiumClmmMarket, RaydiumCLMMPool};
@@ -35,6 +39,12 @@ pub enum CachedPool {
     MeteoraDLMM { addr: String, pool: MeteoraDLMMPool, rx_bal: u64, ry_bal: u64 },
     PumpfunAmm { addr: String, pool: PumpfunAmmPool },
     OrcaWhirlpool { addr: String, pool: WhirlpoolPool, a_bal: u64, b_bal: u64 },
+    // Appended last on purpose: bincode encodes enum variants by declaration
+    // order, so a new variant must go at the end to keep existing pools.cache
+    // (Orca = index 6) decodable.
+    PumpfunBondingCurve { addr: String, pool: PumpfunBondingCurvePool },
+    Bonk { addr: String, pool: BonkPoolState },
+    MeteoraDBC { addr: String, pool: DbcVirtualPool, config: DbcConfig },
 }
 
 impl CachedPool {
@@ -91,6 +101,27 @@ impl CachedPool {
                 let market = PumpfunAmmMarket::new(pool, addr.clone());
                 make_entry(addr, "Pumpfun AMM", market, cached)
             }
+            Self::PumpfunBondingCurve { addr, pool } => {
+                let cached = bincode::serialize(&Self::PumpfunBondingCurve {
+                    addr: addr.clone(), pool: pool.clone(),
+                }).unwrap_or_default();
+                let market = PumpfunBondingCurveMarket::new(pool, addr.clone());
+                make_entry(addr, "Pumpfun BC", market, cached)
+            }
+            Self::Bonk { addr, pool } => {
+                let cached = bincode::serialize(&Self::Bonk {
+                    addr: addr.clone(), pool: pool.clone(),
+                }).unwrap_or_default();
+                let market = BonkMarket::new(pool, addr.clone());
+                make_entry(addr, "Bonk", market, cached)
+            }
+            Self::MeteoraDBC { addr, pool, config } => {
+                let cached = bincode::serialize(&Self::MeteoraDBC {
+                    addr: addr.clone(), pool: pool.clone(), config: config.clone(),
+                }).unwrap_or_default();
+                let market = DbcMarket::new(pool, config, addr.clone());
+                make_entry(addr, "Meteora DBC", market, cached)
+            }
             Self::OrcaWhirlpool { addr, pool, a_bal, b_bal } => {
                 let cached = bincode::serialize(&Self::OrcaWhirlpool {
                     addr: addr.clone(), pool: pool.clone(), a_bal, b_bal,
@@ -102,6 +133,22 @@ impl CachedPool {
             }
         }
     }
+}
+
+/// Build a DBC PoolEntry with a known `current_point` (slot/time) so the fee
+/// scheduler is accurate at load. The cache-reload path (`into_pool_entry`) has
+/// no clock, so it falls back to the cliff (max) fee.
+pub fn dbc_pool_entry(
+    addr: String,
+    pool: DbcVirtualPool,
+    config: DbcConfig,
+    current_point: u64,
+) -> (String, PoolEntry) {
+    let cached = bincode::serialize(&CachedPool::MeteoraDBC {
+        addr: addr.clone(), pool: pool.clone(), config: config.clone(),
+    }).unwrap_or_default();
+    let market = DbcMarket::new(pool, config, addr.clone()).with_current_point(current_point);
+    make_entry(addr, "Meteora DBC", market, cached)
 }
 
 /// Build a PoolEntry, resolving quote/base mints from market metadata once.

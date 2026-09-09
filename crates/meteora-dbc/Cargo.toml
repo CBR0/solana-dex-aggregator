@@ -1,0 +1,11 @@
+[package]
+name = "meteora-dbc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+solroute-core = { path = "../core" }
+solana-pubkey = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+uint = "0.10"

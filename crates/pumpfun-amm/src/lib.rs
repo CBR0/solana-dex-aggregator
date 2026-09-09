@@ -4,7 +4,7 @@ use solana_pubkey::Pubkey;
 
 use solroute_core::{
     GenericError, Market, PoolFees, PoolFinancials, PoolMetadata,
-    SwapDirection, calculate_price_impact_bps, infer_mint_decimals,
+    SwapDirection, WSOL, calculate_price_impact_bps, infer_mint_decimals,
 };
 
 
@@ -223,4 +223,397 @@ impl Market for PumpfunAmmMarket {
         Ok(raw * decimal_adj)
     }
 
+}
+
+// ===========================================================================
+// Pump.fun bonding curve (pre-graduation) — a distinct venue from PumpSwap AMM.
+//
+// Tokens on the pump.fun bonding-curve program `6EF8…F6P` trade against virtual
+// SOL/token reserves via constant product with a protocol + creator fee. When a
+// curve's `complete` flag flips it has migrated to the PumpSwap AMM (`pAMMBay…`)
+// and must NOT be quoted here (the AMM venue owns it).
+//
+// Math + fees ported verbatim from sol-trade-sdk `utils/calc/pumpfun.rs`
+// (`FEE_BASIS_POINTS = 95`, `CREATOR_FEE = 30`): buy is fee-inclusive on the SOL
+// input, sell takes the fee on the SOL output.
+// ===========================================================================
+
+/// BondingCurve account Anchor discriminator (`sha256("account:BondingCurve")[..8]`).
+pub const DISC_BONDING_CURVE: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
+
+/// Byte offset of the `complete` flag inside a BondingCurve account's data
+/// (8-byte disc + 5×u64 reserves/supply). Usable as a memcmp filter to select
+/// only non-complete (still-trading) curves at the RPC.
+pub const BONDING_CURVE_COMPLETE_OFFSET: usize = 8 + 5 * 8;
+
+/// Derive a token's bonding-curve account address (`["bonding-curve", mint]`).
+pub fn derive_bonding_curve_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"bonding-curve", mint.as_ref()],
+        &Pubkey::from_str_const(PUMPFUN_PROGRAM),
+    )
+    .0
+}
+
+/// Protocol fee (basis points) on every bonding-curve trade.
+pub const PUMPFUN_BC_FEE_BASIS_POINTS: u64 = 95;
+/// Additional creator fee (basis points) when the curve has a creator. Total
+/// 95 + 30 = 125 bps for creator coins — **empirically confirmed**: buy quotes
+/// match Jupiter's pump.fun BC route to the unit (+0.0 bps) across live curves.
+pub const PUMPFUN_BC_CREATOR_FEE: u64 = 30;
+
+/// pump.fun mints are always 6 decimals.
+pub const PUMPFUN_TOKEN_DECIMALS: u8 = 6;
+
+#[inline]
+fn bc_total_fee_bps(creator: &Pubkey) -> u64 {
+    PUMPFUN_BC_FEE_BASIS_POINTS
+        + if *creator != Pubkey::default() { PUMPFUN_BC_CREATOR_FEE } else { 0 }
+}
+
+/// Ceil-div fee, matching sol-trade-sdk `compute_fee` exactly (no precision loss
+/// on the sub-10_000 remainder).
+#[inline]
+fn bc_compute_fee(amount: u128, fee_basis_points: u128) -> u128 {
+    let whole = (amount / 10_000).saturating_mul(fee_basis_points);
+    let remainder_product = (amount % 10_000).saturating_mul(fee_basis_points);
+    whole.saturating_add(remainder_product.div_ceil(10_000))
+}
+
+/// Tokens received for spending `sol_in` lamports (fee-inclusive), capped at the
+/// curve's real token reserves.
+pub fn bc_buy_tokens_out(
+    virtual_token_reserves: u128,
+    virtual_sol_reserves: u128,
+    real_token_reserves: u128,
+    creator: &Pubkey,
+    sol_in: u64,
+) -> u64 {
+    if sol_in == 0 || virtual_token_reserves == 0 {
+        return 0;
+    }
+    let total = bc_total_fee_bps(creator) as u128;
+    // Strip the fee from the SOL input, then apply constant product.
+    let input = (sol_in as u128) * 10_000 / (total + 10_000);
+    let denominator = virtual_sol_reserves + input;
+    if denominator == 0 {
+        return 0;
+    }
+    let out = (input * virtual_token_reserves / denominator).min(real_token_reserves);
+    out.min(u64::MAX as u128) as u64
+}
+
+/// SOL received (after fee) for selling `token_in` base units.
+pub fn bc_sell_sol_out(
+    virtual_token_reserves: u128,
+    virtual_sol_reserves: u128,
+    creator: &Pubkey,
+    token_in: u64,
+) -> u64 {
+    if token_in == 0 || virtual_token_reserves == 0 {
+        return 0;
+    }
+    let numerator = (token_in as u128) * virtual_sol_reserves;
+    let denominator = virtual_token_reserves + token_in as u128;
+    let sol_cost = numerator / denominator;
+    let fee = bc_compute_fee(sol_cost, bc_total_fee_bps(creator) as u128);
+    sol_cost.saturating_sub(fee).min(u64::MAX as u128) as u64
+}
+
+/// Parse a `BondingCurve` account's raw data (including the 8-byte discriminator).
+/// Uses borsh `deserialize` (not `try_from_slice`) so newer trailing fields
+/// (`is_mayhem_mode`, `is_cashback_coin`, `quote_mint`) on extended accounts are
+/// ignored — only the stable prefix through `creator` is read. Returns None if
+/// the discriminator doesn't match or the buffer is too short.
+pub fn parse_bonding_curve(data: &[u8]) -> Option<PumpfunBondingCurve> {
+    if data.len() < 8 || data[..8] != DISC_BONDING_CURVE {
+        return None;
+    }
+    PumpfunBondingCurve::deserialize(&mut &data[8..]).ok()
+}
+
+/// A pump.fun bonding curve as a routable "pool": the parsed curve state plus the
+/// mint it prices. Always quoted against WSOL (SOL-paired curves only).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PumpfunBondingCurvePool {
+    pub mint: Pubkey,
+    /// The bonding-curve account address (PDA `["bonding-curve", mint]`).
+    pub bonding_curve: Pubkey,
+    pub curve: PumpfunBondingCurve,
+}
+
+pub struct PumpfunBondingCurveMarket {
+    pub pool: PumpfunBondingCurvePool,
+    pub pool_address: String,
+}
+
+impl PumpfunBondingCurveMarket {
+    pub fn new(pool: PumpfunBondingCurvePool, pool_address: String) -> Self {
+        Self { pool, pool_address }
+    }
+
+    fn wsol() -> Pubkey {
+        Pubkey::from_str_const(WSOL)
+    }
+}
+
+impl Market for PumpfunBondingCurveMarket {
+    fn metadata(&self) -> Result<PoolMetadata, GenericError> {
+        let total_fee = bc_total_fee_bps(&self.pool.curve.creator);
+        Ok(PoolMetadata {
+            address: self.pool_address.clone(),
+            dex_name: "Pumpfun BC".to_string(),
+            quote_mint: Self::wsol(),
+            base_mint: self.pool.mint,
+            // Reserves live in the curve account itself; watch it for freshness.
+            quote_vault: self.pool.bonding_curve,
+            base_vault: self.pool.bonding_curve,
+            fees: PoolFees { trade_fee_bps: total_fee, protocol_fee_bps: None },
+        })
+    }
+
+    fn financials(&self) -> Result<PoolFinancials, GenericError> {
+        Ok(PoolFinancials {
+            quote_balance: self.pool.curve.real_sol_reserves,
+            base_balance: self.pool.curve.real_token_reserves,
+            quote_decimals: 9,
+            base_decimals: PUMPFUN_TOKEN_DECIMALS,
+        })
+    }
+
+    fn calculate_output(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+    ) -> Result<u64, GenericError> {
+        let c = &self.pool.curve;
+        if c.complete {
+            return Err("bonding curve complete (migrated to PumpSwap AMM)".into());
+        }
+        let out = match direction {
+            // Buy = spend SOL (quote), receive token (base).
+            SwapDirection::Buy => bc_buy_tokens_out(
+                c.virtual_token_reserves as u128,
+                c.virtual_sol_reserves as u128,
+                c.real_token_reserves as u128,
+                &c.creator,
+                amount_in,
+            ),
+            // Sell = spend token (base), receive SOL (quote).
+            SwapDirection::Sell => bc_sell_sol_out(
+                c.virtual_token_reserves as u128,
+                c.virtual_sol_reserves as u128,
+                &c.creator,
+                amount_in,
+            ),
+        };
+        if out == 0 {
+            return Err("bonding curve produced zero output".into());
+        }
+        Ok(out)
+    }
+
+    fn calculate_output_live(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        pool_data: Option<&[u8]>,
+        _quote_vault_balance: u64,
+        _base_vault_balance: u64,
+    ) -> Result<u64, GenericError> {
+        // Re-parse live curve reserves from the streamed curve-account bytes
+        // (reserves change every trade); fall back to the reserves parsed at
+        // load time when no live data is present.
+        if let Some(data) = pool_data {
+            if let Some(curve) = parse_bonding_curve(data) {
+                if curve.complete {
+                    return Err("bonding curve complete (migrated to PumpSwap AMM)".into());
+                }
+                let out = match direction {
+                    SwapDirection::Buy => bc_buy_tokens_out(
+                        curve.virtual_token_reserves as u128,
+                        curve.virtual_sol_reserves as u128,
+                        curve.real_token_reserves as u128,
+                        &curve.creator,
+                        amount_in,
+                    ),
+                    SwapDirection::Sell => bc_sell_sol_out(
+                        curve.virtual_token_reserves as u128,
+                        curve.virtual_sol_reserves as u128,
+                        &curve.creator,
+                        amount_in,
+                    ),
+                };
+                return if out == 0 {
+                    Err("bonding curve produced zero output".into())
+                } else {
+                    Ok(out)
+                };
+            }
+        }
+        self.calculate_output(amount_in, direction)
+    }
+
+    fn calculate_price_impact(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+    ) -> Result<u64, GenericError> {
+        let pre = self.current_price()?;
+        let out = self.calculate_output(amount_in, direction)?;
+        let c = &self.pool.curve;
+        let (new_sol, new_tok) = match direction {
+            SwapDirection::Buy => (
+                c.virtual_sol_reserves as u128 + amount_in as u128,
+                (c.virtual_token_reserves as u128).saturating_sub(out as u128),
+            ),
+            SwapDirection::Sell => (
+                (c.virtual_sol_reserves as u128).saturating_sub(out as u128),
+                c.virtual_token_reserves as u128 + amount_in as u128,
+            ),
+        };
+        if new_tok == 0 {
+            return Err("bonding curve exhausted".into());
+        }
+        let post = (new_sol as f64 / new_tok as f64) * 10f64.powi(PUMPFUN_TOKEN_DECIMALS as i32 - 9);
+        Ok(calculate_price_impact_bps(pre, post))
+    }
+
+    fn current_price(&self) -> Result<f64, GenericError> {
+        let c = &self.pool.curve;
+        if c.virtual_token_reserves == 0 {
+            return Err("bonding curve has zero virtual token reserves".into());
+        }
+        let raw = c.virtual_sol_reserves as f64 / c.virtual_token_reserves as f64;
+        Ok(raw * 10f64.powi(PUMPFUN_TOKEN_DECIMALS as i32 - 9))
+    }
+}
+
+#[cfg(test)]
+mod bc_tests {
+    use super::*;
+
+    // A fresh curve (pump.fun genesis constants) with a creator → 125 bps fee.
+    fn fresh_curve(creator: Pubkey) -> PumpfunBondingCurve {
+        PumpfunBondingCurve {
+            virtual_token_reserves: 1_073_000_000_000_000,
+            virtual_sol_reserves: 30_000_000_000,
+            real_token_reserves: 793_100_000_000_000,
+            real_sol_reserves: 0,
+            token_total_supply: 1_000_000_000_000_000,
+            complete: false,
+            creator,
+        }
+    }
+
+    #[test]
+    fn buy_matches_sdk_fee_inclusive_cp() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        let out = bc_buy_tokens_out(
+            1_073_000_000_000_000,
+            30_000_000_000,
+            793_100_000_000_000,
+            &creator,
+            1_000_000_000,
+        );
+        let input = 1_000_000_000u128 * 10_000 / (125 + 10_000);
+        let expected = (input * 1_073_000_000_000_000u128 / (30_000_000_000u128 + input)) as u64;
+        assert_eq!(out, expected);
+        assert!(out > 0 && (out as u128) < 793_100_000_000_000);
+    }
+
+    #[test]
+    fn no_creator_uses_95_bps_only() {
+        let out_creator = bc_buy_tokens_out(
+            1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000,
+            &Pubkey::new_from_array([9u8; 32]), 1_000_000_000);
+        let out_none = bc_buy_tokens_out(
+            1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000,
+            &Pubkey::default(), 1_000_000_000);
+        // Lower fee (95 vs 125) → more tokens out.
+        assert!(out_none > out_creator);
+    }
+
+    #[test]
+    fn sell_takes_fee_on_sol_out() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        let gross = 1_000_000_000_000u128 * 30_000_000_000u128
+            / (1_073_000_000_000_000u128 + 1_000_000_000_000u128);
+        let fee = bc_compute_fee(gross, 125);
+        let expected = (gross - fee) as u64;
+        let out = bc_sell_sol_out(1_073_000_000_000_000, 30_000_000_000, &creator, 1_000_000_000_000);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn complete_curve_rejected() {
+        let mut c = fresh_curve(Pubkey::new_from_array([7u8; 32]));
+        c.complete = true;
+        let m = PumpfunBondingCurveMarket::new(
+            PumpfunBondingCurvePool { mint: Pubkey::default(), bonding_curve: Pubkey::default(), curve: c },
+            "x".into(),
+        );
+        assert!(m.calculate_output(1_000_000_000, SwapDirection::Buy).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_bad_discriminator() {
+        let mut data = vec![0u8; 120];
+        data[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(parse_bonding_curve(&data).is_none());
+    }
+
+    // Serialize a curve to raw account bytes (disc + fields) for live-data tests.
+    fn curve_bytes(vtok: u64, vsol: u64, rtok: u64, rsol: u64, creator: Pubkey) -> Vec<u8> {
+        let mut d = Vec::with_capacity(81);
+        d.extend_from_slice(&DISC_BONDING_CURVE);
+        d.extend_from_slice(&vtok.to_le_bytes());
+        d.extend_from_slice(&vsol.to_le_bytes());
+        d.extend_from_slice(&rtok.to_le_bytes());
+        d.extend_from_slice(&rsol.to_le_bytes());
+        d.extend_from_slice(&1_000_000_000_000_000u64.to_le_bytes()); // total_supply
+        d.push(0u8); // complete = false
+        d.extend_from_slice(creator.as_ref());
+        d
+    }
+
+    #[test]
+    fn live_data_overrides_baked_reserves() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        // Baked (load-time) curve.
+        let m = PumpfunBondingCurveMarket::new(
+            PumpfunBondingCurvePool {
+                mint: Pubkey::default(),
+                bonding_curve: Pubkey::default(),
+                curve: fresh_curve(creator),
+            },
+            "x".into(),
+        );
+        let baked = m.calculate_output(100_000_000, SwapDirection::Buy).unwrap();
+        // Live curve with MORE virtual SOL (price moved up) → fewer tokens out.
+        let live = curve_bytes(1_073_000_000_000_000, 60_000_000_000, 793_100_000_000_000, 30_000_000_000, creator);
+        let live_out = m
+            .calculate_output_live(100_000_000, SwapDirection::Buy, Some(&live), 0, 0)
+            .unwrap();
+        assert!(live_out < baked, "live {live_out} should be < baked {baked}");
+        // No live data → baked path.
+        let fallback = m.calculate_output_live(100_000_000, SwapDirection::Buy, None, 0, 0).unwrap();
+        assert_eq!(fallback, baked);
+    }
+
+    #[test]
+    fn live_complete_curve_rejected() {
+        let creator = Pubkey::new_from_array([7u8; 32]);
+        let m = PumpfunBondingCurveMarket::new(
+            PumpfunBondingCurvePool {
+                mint: Pubkey::default(),
+                bonding_curve: Pubkey::default(),
+                curve: fresh_curve(creator),
+            },
+            "x".into(),
+        );
+        let mut live = curve_bytes(1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000, 0, creator);
+        live[48] = 1; // complete = true
+        assert!(m.calculate_output_live(100_000_000, SwapDirection::Buy, Some(&live), 0, 0).is_err());
+    }
 }

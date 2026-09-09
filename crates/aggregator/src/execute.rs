@@ -20,6 +20,9 @@ use solroute_executor::meteora_damm_v1::{self, DammV1Accounts};
 use solroute_executor::meteora_dlmm::{self, DlmmAccounts};
 use solroute_executor::meteora_damm_v2::{self, DammV2Accounts};
 use solroute_executor::pumpswap::{self, PumpSwapAccounts};
+use solroute_executor::pumpfun_bc::{self, PumpBcAccounts};
+use solroute_executor::meteora_dbc::{self as dbc_exec, DbcAccounts};
+use solroute_executor::bonk::{self as bonk_exec, BonkAccounts};
 use solroute_executor::raydium_amm_v4;
 use solroute_executor::raydium_clmm;
 use solroute_executor::orca_whirlpool as orca_exec;
@@ -56,6 +59,75 @@ async fn resolve_token_programs(rpc: &RpcClient, mints: &[Pubkey]) -> Vec<Pubkey
                 .unwrap_or(legacy)
         })
         .collect()
+}
+
+/// Observe bonk.fun's two fee-vault remaining accounts (platform + creator, both
+/// WSOL) from a recent swap on the pool. The current LaunchLab program requires
+/// them but doesn't expose their derivation from public account data; every bonk
+/// buy/sell carries them at instruction account indices 16 and 17. Returns
+/// `(platform_fee_vault, creator_fee_vault)`.
+pub async fn observe_bonk_fee_vaults(rpc: &RpcClient, pool: &Pubkey) -> Option<(Pubkey, Pubkey)> {
+    use solana_rpc_client_api::request::RpcRequest;
+    let bonk_program = bonk_exec::PROGRAM_ID.to_string();
+    let sigs: serde_json::Value = rpc
+        .send(
+            RpcRequest::Custom { method: "getSignaturesForAddress" },
+            serde_json::json!([pool.to_string(), {"limit": 25}]),
+        )
+        .await
+        .ok()?;
+    for s in sigs.as_array()?.iter() {
+        let sig = s.get("signature")?.as_str()?;
+        let tx: serde_json::Value = match rpc
+            .send(
+                RpcRequest::Custom { method: "getTransaction" },
+                serde_json::json!([sig, {"maxSupportedTransactionVersion": 0, "encoding": "json"}]),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let msg = match tx.get("transaction").and_then(|t| t.get("message")) {
+            Some(m) => m,
+            None => continue,
+        };
+        // Static keys + ALT-loaded addresses, in on-chain index order.
+        let mut keys: Vec<String> = msg
+            .get("accountKeys")
+            .and_then(|k| k.as_array())
+            .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if let Some(loaded) = tx.get("meta").and_then(|m| m.get("loadedAddresses")) {
+            for field in ["writable", "readonly"] {
+                if let Some(arr) = loaded.get(field).and_then(|v| v.as_array()) {
+                    keys.extend(arr.iter().filter_map(|x| x.as_str().map(String::from)));
+                }
+            }
+        }
+        let Some(ixs) = msg.get("instructions").and_then(|i| i.as_array()) else { continue };
+        for ix in ixs {
+            let pid_idx = ix.get("programIdIndex").and_then(|v| v.as_u64());
+            let is_bonk = pid_idx
+                .and_then(|i| keys.get(i as usize))
+                .map(|k| k.as_str() == bonk_program.as_str())
+                .unwrap_or(false);
+            if !is_bonk {
+                continue;
+            }
+            // Any bonk buy/sell carries 18 accounts: fee vaults at 16 and 17.
+            let Some(accts) = ix.get("accounts").and_then(|a| a.as_array()) else { continue };
+            if accts.len() < 18 {
+                continue;
+            }
+            let idx16 = accts[16].as_u64()? as usize;
+            let idx17 = accts[17].as_u64()? as usize;
+            let v16 = Pubkey::from_str(keys.get(idx16)?).ok()?;
+            let v17 = Pubkey::from_str(keys.get(idx17)?).ok()?;
+            return Some((v16, v17));
+        }
+    }
+    None
 }
 
 /// Build swap instructions for a single routed hop. Async because Raydium V4
@@ -117,6 +189,49 @@ pub async fn build_hop_instructions(
                 is_mayhem: false,
             };
             pumpswap::build_swap(&accounts, &leg, opts)
+        }
+        CachedPool::PumpfunBondingCurve { pool, .. } => {
+            // Only the token side has a mint account; SOL settles natively.
+            let progs = resolve_token_programs(rpc, &[pool.mint]).await;
+            let accounts = PumpBcAccounts {
+                mint: pool.mint,
+                bonding_curve: pool.bonding_curve,
+                creator: pool.curve.creator,
+            };
+            pumpfun_bc::build_swap(&accounts, &leg, progs[0], opts)
+        }
+        CachedPool::MeteoraDBC { pool, config, .. } => {
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, config.quote_mint]).await;
+            let accounts = DbcAccounts {
+                pool: pool_pubkey,
+                config: pool.config,
+                base_mint: pool.base_mint,
+                quote_mint: config.quote_mint,
+                base_vault: pool.base_vault,
+                quote_vault: pool.quote_vault,
+            };
+            dbc_exec::build_swap(&accounts, &leg, progs[0], progs[1], opts)
+        }
+        CachedPool::Bonk { pool, .. } => {
+            // The current LaunchLab program needs 2 fee-vault remaining accounts
+            // that aren't derivable from public account data — observe them from a
+            // recent swap on this pool.
+            let (platform_fee_vault, creator_fee_vault) = observe_bonk_fee_vaults(rpc, &pool_pubkey)
+                .await
+                .ok_or_else(|| GenericError::from(
+                    "bonk: could not observe fee vaults from a recent swap on this pool",
+                ))?;
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await;
+            let accounts = BonkAccounts {
+                pool_state: pool_pubkey,
+                global_config: pool.global_config,
+                platform_config: pool.platform_config,
+                base_mint: pool.base_mint,
+                quote_mint: pool.quote_mint,
+                base_vault: pool.base_vault,
+                quote_vault: pool.quote_vault,
+            };
+            bonk_exec::build_swap(&accounts, &leg, progs[0], progs[1], platform_fee_vault, creator_fee_vault, opts)
         }
         CachedPool::RaydiumV4 { pool, .. } => {
             raydium_amm_v4::build_swap(rpc, &pool, pool_pubkey, &leg, opts).await
