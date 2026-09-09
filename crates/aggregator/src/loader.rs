@@ -223,6 +223,24 @@ fn cached_usd_estimate(pool: CachedPool) -> f64 {
             usd(rx_bal, p.token_x_mint.as_ref()).max(usd(ry_bal, p.token_y_mint.as_ref()))
         }
         CachedPool::PumpfunAmm { .. } => 0.0,
+        // Curvas pump.fun bonding curve são sempre pareadas em WSOL: pontua
+        // pelo lado SOL (reservas reais). Pools concluídas/migradas (`complete`)
+        // não são roteáveis — o build já as filtra; aqui só estima USD.
+        CachedPool::PumpfunBondingCurve { pool: p, .. } => {
+            use std::str::FromStr;
+            Pubkey::from_str("So11111111111111111111111111111111111111112")
+                .map(|w| usd(p.curve.real_sol_reserves, w.as_ref()))
+                .unwrap_or(0.0)
+        }
+        // bonk.fun / LaunchLab: pontua pelos saldos reais dos vaults.
+        CachedPool::Bonk { pool: p, .. } => {
+            usd(p.real_base, p.base_mint.as_ref()).max(usd(p.real_quote, p.quote_mint.as_ref()))
+        }
+        // Meteora DBC: reservas virtuais como estimativa (mesmo espírito dos
+        // amounts embutidos da DAMM V2); quote_mint vive no config.
+        CachedPool::MeteoraDBC { pool: p, config: c, .. } => {
+            usd(p.base_reserve, p.base_mint.as_ref()).max(usd(p.quote_reserve, c.quote_mint.as_ref()))
+        }
         CachedPool::OrcaWhirlpool { pool: p, a_bal, b_bal, .. } => {
             usd(a_bal, p.token_mint_a.as_ref()).max(usd(b_bal, p.token_mint_b.as_ref()))
         }
@@ -330,19 +348,23 @@ const DESCRIPTORS: [DexDescriptor; 9] = [
     },
     // bonk.fun / Raydium LaunchLab. PoolState shares CLMM's discriminator but
     // lives under a different program — disc-only (sizes vary by curve type).
+    // Sem proxy de liquidez modelado ainda: top-N cai no early-stop arbitrário.
     DexDescriptor {
         name: "Bonk",
         program_id: BONK_LAUNCHPAD_PROGRAM,
         data_sizes: &[],
         discriminator: Some(DISC_POOL_STATE),
+        liquidity_proxy: None,
     },
     // Meteora Dynamic Bonding Curve. VirtualPool is 424 bytes; disc-only filter
     // (a transfer-hook pool variant shares the size but not the discriminator).
+    // Sem proxy de liquidez modelado ainda: top-N cai no early-stop arbitrário.
     DexDescriptor {
         name: "Meteora DBC",
         program_id: METEORA_DBC_PROGRAM,
         data_sizes: &[],
         discriminator: Some(DISC_VIRTUAL_POOL),
+        liquidity_proxy: None,
     },
 ];
 
