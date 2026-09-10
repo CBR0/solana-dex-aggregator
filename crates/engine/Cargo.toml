@@ -7,10 +7,11 @@ edition = "2024"
 solroute-core = { path = "../core" }
 solroute-aggregator = { path = "../aggregator" }
 solana-pubkey = { workspace = true }
-solana-rpc-client = "3.0"
-solana-rpc-client-api = "3.0"
-solana-account-decoder-client-types = "3.0"
-solana-commitment-config = "3.0"
+solana-account = { workspace = true }
+solana-rpc-client = "4"
+solana-rpc-client-api = "4"
+solana-account-decoder-client-types = "4"
+solana-commitment-config = "3"
 serde = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"

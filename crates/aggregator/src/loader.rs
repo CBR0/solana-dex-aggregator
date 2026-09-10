@@ -1,4 +1,4 @@
-#![allow(deprecated)] // get_program_accounts_with_config — successor returns UI-encoded data
+#![allow(deprecated)] // legacy: successors of removed 3.x RPC helpers return UI-encoded data
 
 //! Async pool loading from Solana RPC for all supported DEXs.
 //!
@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use borsh::BorshDeserialize;
-use solana_account_decoder_client_types::UiAccountEncoding;
+use solana_account::Account;
+use solana_account_decoder_client_types::{UiAccount, UiAccountEncoding};
 use solana_commitment_config::CommitmentConfig;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_rpc_client_api::config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_rpc_client_api::filter::{Memcmp, RpcFilterType};
-use solana_sdk::account::Account;
 
 use meteora_damm::{
     derive_token_vault_address, MeteoraDAMMPool,
@@ -46,6 +46,30 @@ pub type ProgressCallback = Box<dyn Fn(LoadProgress) + Send + Sync>;
 const BALANCE_BATCH_SIZE: usize = 100;
 const BALANCE_CONCURRENCY: usize = 20;
 const DEFAULT_MAX_POOLS_PER_DEX: usize = usize::MAX;
+
+/// Convert a UI account from `get_program_ui_accounts_with_config` into a
+/// decoded `Account` — the shape the removed
+/// `get_program_ui_accounts_with_config` returned. Works for full blobs and
+/// dataSlice responses alike (slices land as truncated `data`, as before).
+pub(crate) fn ui_account_to_account(ui: &UiAccount) -> Option<Account> {
+    Some(Account {
+        lamports: ui.lamports,
+        data: ui.data.decode()?,
+        owner: ui.owner.parse().ok()?,
+        executable: ui.executable,
+        rent_epoch: ui.rent_epoch,
+    })
+}
+
+/// Map UI accounts to decoded accounts, dropping undecodable entries.
+pub(crate) fn decode_keyed(
+    keyed: Vec<(Pubkey, UiAccount)>,
+) -> Vec<(Pubkey, Account)> {
+    keyed
+        .into_iter()
+        .filter_map(|(pk, ui)| ui_account_to_account(&ui).map(|a| (pk, a)))
+        .collect()
+}
 
 /// Proxy de liquidez para rankear pools por USD sem pagar um full load.
 ///
@@ -576,7 +600,13 @@ impl PoolLoader {
                 },
                 ..Default::default()
             };
-            self.rpc.get_program_accounts_with_config(&program, config)
+            async move {
+                Ok::<Vec<(Pubkey, Account)>, GenericError>(decode_keyed(
+                    self.rpc
+                        .get_program_ui_accounts_with_config(&program, config)
+                        .await?,
+                ))
+            }
         };
         let (mints_gpa, data_gpa) = tokio::join!(
             gpa(proxy.mints.0, proxy.mints.1),
@@ -667,10 +697,10 @@ impl PoolLoader {
                         },
                         ..Default::default()
                     };
-                    match self.rpc.get_program_accounts_with_config(&program, config).await {
+                    match self.rpc.get_program_ui_accounts_with_config(&program, config).await {
                         Ok(keyed) => {
                             any_ok = true;
-                            for (pk, acc) in keyed {
+                            for (pk, acc) in decode_keyed(keyed) {
                                 if acc.data.len() < 32 { continue; }
                                 let v_raw = &acc.data[..32];
                                 let vault = proxy
@@ -687,9 +717,11 @@ impl PoolLoader {
             }
         } else {
             // GPA único de mints (64B) + vaults (64B) contíguos, programa inteiro.
-            let gpa = |offset: usize, length: usize| {
+        let gpa = |offset: usize, length: usize| {
+            let filters = filters.clone();
+            async move {
                 let config = RpcProgramAccountsConfig {
-                    filters: Some(filters.clone()),
+                    filters: Some(filters),
                     account_config: RpcAccountInfoConfig {
                         encoding: Some(UiAccountEncoding::Base64),
                         commitment: Some(CommitmentConfig::confirmed()),
@@ -701,8 +733,13 @@ impl PoolLoader {
                     },
                     ..Default::default()
                 };
-                self.rpc.get_program_accounts_with_config(&program, config)
-            };
+                Ok::<Vec<(Pubkey, Account)>, GenericError>(decode_keyed(
+                    self.rpc
+                        .get_program_ui_accounts_with_config(&program, config)
+                        .await?,
+                ))
+            }
+        };
             let (mints_gpa, vaults_gpa) = tokio::join!(
                 gpa(proxy.sides[0].0, 64),
                 gpa(proxy.sides[0].1, 64),
@@ -831,10 +868,10 @@ impl PoolLoader {
                     },
                     ..Default::default()
                 };
-                match self.rpc.get_program_accounts_with_config(&program, config).await {
+                match self.rpc.get_program_ui_accounts_with_config(&program, config).await {
                     Ok(keyed) => {
                         any_ok = true;
-                        for (pk, acc) in keyed {
+                        for (pk, acc) in decode_keyed(keyed) {
                             if acc.data.len() >= amt_off + 8 {
                                 let amt =
                                     u64::from_le_bytes(acc.data[amt_off..amt_off + 8].try_into().unwrap());
@@ -1304,7 +1341,11 @@ impl PoolLoader {
             },
             ..Default::default()
         };
-        Ok(self.rpc.get_program_accounts_with_config(program_id, config).await?)
+        Ok(decode_keyed(
+            self.rpc
+                .get_program_ui_accounts_with_config(program_id, config)
+                .await?,
+        ))
     }
 
     /// Fallback: discover addresses via dataSlice, then batch-fetch full data.
@@ -1331,7 +1372,7 @@ impl PoolLoader {
         };
 
         let addresses: Vec<Pubkey> = self.rpc
-            .get_program_accounts_with_config(program_id, config)
+            .get_program_ui_accounts_with_config(program_id, config)
             .await?
             .into_iter()
             .map(|(pubkey, _)| pubkey)
@@ -1415,7 +1456,7 @@ impl PoolLoader {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                if let Some(account) = keyed.account.decode::<Account>() {
+                if let Some(account) = ui_account_to_account(&keyed.account) {
                     results.push((pubkey, account));
                 }
             }

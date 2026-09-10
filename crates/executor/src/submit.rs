@@ -10,11 +10,12 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_rpc_client_api::config::RpcSimulateTransactionConfig;
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
-use solana_sdk::hash::Hash;
+use solana_hash::Hash;
 use solana_sdk::instruction::Instruction;
-use solana_sdk::message::{v0, AddressLookupTableAccount, Message, VersionedMessage};
-use solana_sdk::signature::{Signature, Signer};
-use solana_sdk::transaction::{Transaction, VersionedTransaction};
+use solana_message::{v0, AddressLookupTableAccount, Message, VersionedMessage};
+use solana_signature::Signature;
+use solana_signer::Signer;
+use solana_transaction::{versioned::VersionedTransaction, Transaction};
 
 use solroute_core::GenericError;
 
@@ -157,7 +158,7 @@ pub async fn simulate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solana_sdk::signature::Keypair;
+    use solana_keypair::Keypair;
 
     #[test]
     fn compute_budget_wire_format() {

@@ -18,8 +18,9 @@ use solana_address_lookup_table_interface::state::AddressLookupTable;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
-use solana_sdk::message::AddressLookupTableAccount;
-use solana_sdk::signature::{Keypair, Signer};
+use solana_message::AddressLookupTableAccount;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
 
 use solroute_core::GenericError;
 

@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use futures::future::join_all;
-use solana_account_decoder_client_types::UiAccountEncoding;
+use solana_account::Account;
+use solana_account_decoder_client_types::{UiAccount, UiAccountEncoding};
 use solana_commitment_config::CommitmentConfig;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
@@ -20,6 +21,25 @@ const BATCH_SIZE: usize = 100;
 const BATCH_CONCURRENCY: usize = 20;
 
 const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+
+/// Convert a UI account from `get_program_ui_accounts_with_config` into a
+/// decoded `Account` (full blobs and dataSlice responses alike).
+fn ui_account_to_account(ui: &UiAccount) -> Option<Account> {
+    Some(Account {
+        lamports: ui.lamports,
+        data: ui.data.decode()?,
+        owner: ui.owner.parse().ok()?,
+        executable: ui.executable,
+        rent_epoch: ui.rent_epoch,
+    })
+}
+
+fn decode_keyed(keyed: Vec<(Pubkey, UiAccount)>) -> Vec<(Pubkey, Account)> {
+    keyed
+        .into_iter()
+        .filter_map(|(pk, ui)| ui_account_to_account(&ui).map(|a| (pk, a)))
+        .collect()
+}
 
 const MAX_RETRIES: u32 = 6;
 const RETRY_BASE_MS: u64 = 250;
@@ -387,10 +407,10 @@ pub async fn fetch_bitmap_extensions(
     };
 
     let accounts = match rpc
-        .get_program_accounts_with_config(&dlmm_program, config)
+        .get_program_ui_accounts_with_config(&dlmm_program, config)
         .await
     {
-        Ok(a) => a,
+        Ok(a) => decode_keyed(a),
         Err(e) => {
             eprintln!("[cold_start] bitmap extension GPA error: {e}");
             return;
@@ -448,8 +468,9 @@ pub async fn fetch_clmm_amm_configs(rpc: &RpcClient, store: &AccountStore) {
         },
         ..Default::default()
     };
-    match rpc.get_program_accounts_with_config(&clmm_program, config).await {
+    match rpc.get_program_ui_accounts_with_config(&clmm_program, config).await {
         Ok(accounts) => {
+            let accounts = decode_keyed(accounts);
             let n = accounts.len();
             for (pubkey, account) in accounts {
                 store.upsert(pubkey, account.data, account.owner, account.lamports, fetch_slot);

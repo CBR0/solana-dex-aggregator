@@ -10,8 +10,10 @@ use std::str::FromStr;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
-use solana_sdk::message::AddressLookupTableAccount;
-use solana_sdk::signature::{Keypair, Signature, Signer};
+use solana_message::AddressLookupTableAccount;
+use solana_keypair::Keypair;
+use solana_signature::Signature;
+use solana_signer::Signer;
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 
 use solroute_core::{GenericError, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
@@ -81,7 +83,7 @@ pub async fn observe_bonk_fee_vaults(rpc: &RpcClient, pool: &Pubkey) -> Option<(
         let tx: serde_json::Value = match rpc
             .send(
                 RpcRequest::Custom { method: "getTransaction" },
-                serde_json::json!([sig, {"maxSupportedTransactionVersion": 0, "encoding": "json"}]),
+                serde_json::json!([sig, {"maxSupportedTransactionVersion": 1, "encoding": "json"}]),
             )
             .await
         {

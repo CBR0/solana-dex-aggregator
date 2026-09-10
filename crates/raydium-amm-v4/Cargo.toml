@@ -8,7 +8,5 @@ solroute-core = { path = "../core" }
 solana-sdk = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-system-interface = { workspace = true }
-spl-associated-token-account = { workspace = true }
-spl-token = { workspace = true }
 serde = { workspace = true }
 borsh = { workspace = true }

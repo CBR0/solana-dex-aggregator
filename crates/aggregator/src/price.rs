@@ -7,6 +7,7 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solroute_core::{GenericError, USDC, WSOL};
 
+use crate::loader::ui_account_to_account;
 use crate::pool_index::PoolIndex;
 use crate::types::TokenPrice;
 
@@ -97,11 +98,13 @@ pub async fn fetch_sol_usd_onchain(rpc: &RpcClient) -> Option<f64> {
         ..Default::default()
     };
 
-    #[allow(deprecated)]
-    let accounts = rpc
-        .get_program_accounts_with_config(&program, config)
+    let accounts: Vec<(Pubkey, solana_account::Account)> = rpc
+        .get_program_ui_accounts_with_config(&program, config)
         .await
-        .ok()?;
+        .ok()?
+        .into_iter()
+        .filter_map(|(pk, ui)| ui_account_to_account(&ui).map(|a| (pk, a)))
+        .collect();
 
     // Pick the pool with the highest liquidity.
     let mut best_price: Option<f64> = None;

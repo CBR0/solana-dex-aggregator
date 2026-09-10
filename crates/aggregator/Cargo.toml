@@ -39,16 +39,21 @@ solroute-executor = { path = "../executor" }
 # Workspace deps
 solana-sdk = { workspace = true }
 solana-pubkey = { workspace = true }
+solana-message = { workspace = true }
+solana-account = { workspace = true }
+solana-keypair = { workspace = true }
+solana-signer = { workspace = true }
+solana-signature = { workspace = true }
 serde = { workspace = true }
 borsh = { workspace = true }
 
 # Async + RPC
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-solana-rpc-client = "3.0"
-solana-rpc-client-api = "3.0"
-solana-account-decoder-client-types = "3.0"
-solana-commitment-config = "3.0"
+solana-rpc-client = "4"
+solana-rpc-client-api = "4"
+solana-account-decoder-client-types = "4"
+solana-commitment-config = "3"
 
 # CLI
 indicatif = "0.17"

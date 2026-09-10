@@ -14,12 +14,20 @@ bincode = "1.3"
 
 solana-sdk = { workspace = true }
 solana-pubkey = { workspace = true }
+solana-message = { workspace = true }
+solana-transaction = { workspace = true }
+solana-signature = { workspace = true }
+solana-hash = { workspace = true }
+solana-keypair = { workspace = true }
+solana-signer = { workspace = true }
+# Version pin only (types come via solana-pubkey re-export); see workspace.
+solana-address = { workspace = true }
+# Version pin only (pulled via transaction-status); see workspace.
+solana-reward-info = { workspace = true }
 solana-system-interface = { workspace = true }
 
-spl-associated-token-account = { workspace = true }
-spl-token = { workspace = true }
 
-solana-rpc-client = "3.0"
-solana-rpc-client-api = "3.0"
-solana-commitment-config = "3.0"
-solana-address-lookup-table-interface = { version = "3.0", features = ["bincode"] }
+solana-rpc-client = "4"
+solana-rpc-client-api = "4"
+solana-commitment-config = "3"
+solana-address-lookup-table-interface = { version = "3", features = ["bincode"] }
