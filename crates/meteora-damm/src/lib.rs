@@ -439,7 +439,12 @@ impl MeteoraDAMMV2Market {
         amount_in: u64,
         direction: SwapDirection,
     ) -> Result<u64, GenericError> {
-        let price = self.sqrt_price_to_price(self.token_a_decimals, self.token_b_decimals);
+        // Raw price (token_b_raw per token_a_raw). `sqrt_price²` already encodes
+        // the raw reserve ratio; the Buy/Sell branches below work in raw
+        // amounts, so applying 10^(dec_a-dec_b) here would double-count the
+        // decimal adjustment (1000x for WSOL/USDC: 9 vs 6 decimals).
+        let sqrt_price_f64 = self.pool.sqrt_price as f64 / (1u128 << 64) as f64;
+        let price = sqrt_price_f64 * sqrt_price_f64;
         let fee_bps = self.calculate_base_fee_bps();
 
         let fee_multiplier = 10000 - fee_bps;
@@ -537,8 +542,9 @@ impl Market for MeteoraDAMMV2Market {
         };
 
         let sqrt_price_f64 = sqrt_price as f64 / (1u128 << 64) as f64;
-        let price = sqrt_price_f64 * sqrt_price_f64
-            * 10f64.powi(self.token_a_decimals as i32 - self.token_b_decimals as i32);
+        // Raw price (token_b_raw per token_a_raw) — same reasoning as
+        // `calculate_v2_output`: no 10^(dec_a-dec_b) factor here.
+        let price = sqrt_price_f64 * sqrt_price_f64;
 
         let fee_bps = self.calculate_base_fee_bps();
         let fee_multiplier = 10000 - fee_bps;
