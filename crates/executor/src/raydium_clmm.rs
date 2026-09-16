@@ -8,9 +8,10 @@
 //! current tick + bitmap via `raydium_clmm::tick_arrays`.
 
 use solana_pubkey::Pubkey;
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
-use raydium_clmm::tick_arrays::compute_clmm_remaining_accounts;
+use raydium_clmm::tick_arrays::{compute_clmm_remaining_accounts, pda_array_bitmap_address};
 use raydium_clmm::RaydiumCLMMPool;
 use solroute_core::{GenericError, MEMO_PROGRAM_V2, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
 
@@ -123,6 +124,21 @@ pub fn build_swap(
     // is_buy = a_to_b = zero_for_one = spending token_0.
     let tick_arrays = compute_clmm_remaining_accounts(pool, &pool_pubkey, input_is_0, extension_data)?;
     assemble_swap(pool, pool_pubkey, &tick_arrays, input_program, output_program, leg, opts)
+}
+
+/// Derive and fetch a pool's tick-array bitmap extension account, if it exists.
+///
+/// Pools whose initialized liquidity (and active tick array) extends beyond the
+/// in-pool bitmap range (±512 tick arrays) keep that far-range bitmap in a
+/// separate `pool_tick_array_bitmap_extension` PDA. `compute_clmm_remaining_accounts`
+/// needs that bitmap to decide which far tick arrays are initialized; without it
+/// the swap omits the array holding the current tick and the program rejects it
+/// with `InvalidFirstTickArrayAccount` (6024). Returns `None` for near-price
+/// pools (no extension account) or on fetch failure — the caller then falls back
+/// to the in-pool bitmap only, which is correct for near-price swaps.
+pub async fn fetch_bitmap_extension(rpc: &RpcClient, pool: &Pubkey) -> Option<Vec<u8>> {
+    let (pda, _) = pda_array_bitmap_address(pool).ok()?;
+    rpc.get_account(&pda).await.ok().map(|acc| acc.data)
 }
 
 #[cfg(test)]

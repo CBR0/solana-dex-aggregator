@@ -284,8 +284,20 @@ pub async fn build_hop_instructions(
             } else {
                 (progs[1], progs[0])
             };
-            // None extension data: covers near-price swaps (±512 tick arrays).
-            raydium_clmm::build_swap(&pool, pool_pubkey, in_prog, out_prog, &leg, None, opts)
+            // Tick-array bitmap extension: required when the active tick array
+            // lies outside the in-pool bitmap (±512). Without it the program
+            // rejects the swap with InvalidFirstTickArrayAccount (6024). None
+            // when the pool has no extension (near-price swaps).
+            let extension = raydium_clmm::fetch_bitmap_extension(rpc, &pool_pubkey).await;
+            raydium_clmm::build_swap(
+                &pool,
+                pool_pubkey,
+                in_prog,
+                out_prog,
+                &leg,
+                extension.as_deref(),
+                opts,
+            )
         }
     }
 }
