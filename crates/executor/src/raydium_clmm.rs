@@ -11,6 +11,7 @@ use solana_pubkey::Pubkey;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 
+use borsh::BorshDeserialize;
 use raydium_clmm::tick_arrays::{compute_clmm_remaining_accounts, pda_array_bitmap_address};
 use raydium_clmm::RaydiumCLMMPool;
 use solroute_core::{GenericError, MEMO_PROGRAM_V2, TOKEN_PROGRAM, TOKEN_PROGRAM_2022};
@@ -139,6 +140,16 @@ pub fn build_swap(
 pub async fn fetch_bitmap_extension(rpc: &RpcClient, pool: &Pubkey) -> Option<Vec<u8>> {
     let (pda, _) = pda_array_bitmap_address(pool).ok()?;
     rpc.get_account(&pda).await.ok().map(|acc| acc.data)
+}
+
+/// Fetch and deserialize a pool's live on-chain state, skipping the 8-byte
+/// Anchor discriminator. `tick_current` and `tick_array_bitmap` move with
+/// trading, so a cached pool can compute the wrong tick arrays (→
+/// `InvalidFirstTickArrayAccount`). Returns `None` on fetch/parse failure so
+/// the caller can fall back to its cached copy.
+pub async fn fetch_live_pool(rpc: &RpcClient, pool: &Pubkey) -> Option<RaydiumCLMMPool> {
+    let account = rpc.get_account(pool).await.ok()?;
+    RaydiumCLMMPool::try_from_slice(account.data.get(8..)?).ok()
 }
 
 #[cfg(test)]

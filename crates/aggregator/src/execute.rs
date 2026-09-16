@@ -288,9 +288,16 @@ pub async fn build_hop_instructions(
             // lies outside the in-pool bitmap (±512). Without it the program
             // rejects the swap with InvalidFirstTickArrayAccount (6024). None
             // when the pool has no extension (near-price swaps).
+            //
+            // The cached pool may be stale (tick_current moves with trading), so
+            // prefer the live on-chain pool state to compute the tick arrays;
+            // fall back to the cached copy if the fetch fails.
+            let live_pool = raydium_clmm::fetch_live_pool(rpc, &pool_pubkey)
+                .await
+                .unwrap_or_else(|| pool.clone());
             let extension = raydium_clmm::fetch_bitmap_extension(rpc, &pool_pubkey).await;
             raydium_clmm::build_swap(
-                &pool,
+                &live_pool,
                 pool_pubkey,
                 in_prog,
                 out_prog,
