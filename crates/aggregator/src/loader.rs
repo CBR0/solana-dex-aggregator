@@ -247,8 +247,19 @@ fn cached_usd_estimate(pool: CachedPool) -> f64 {
             usd(a_bal, p.token_a_mint.as_ref()).max(usd(b_bal, p.token_b_mint.as_ref()))
         }
         CachedPool::MeteoraDAMMV2 { pool: p, a_bal, b_bal, .. } => {
+            // Freshness band: DAMM V2 keeps token_a_amount/token_b_amount in
+            // sync with the vaults on every swap, so embedded/vault must be
+            // close to 1. Reject BOTH drained (embedded << vault) and
+            // stale/inflated (embedded >> vault, e.g. pools whose embedded
+            // amounts date from SOL at $10 → ~9x) pools — the latter produce
+            // garbage runtime quotes (quote uses the embedded amounts) and
+            // outrank real pools.
             let fresh = |embedded: u64, vault: u64| {
-                vault == 0 || (embedded as f64 / vault as f64) >= 0.5
+                if vault == 0 {
+                    return embedded == 0;
+                }
+                let ratio = embedded as f64 / vault as f64;
+                (0.5..=2.0).contains(&ratio)
             };
             if !(fresh(p.token_a_amount, a_bal) && fresh(p.token_b_amount, b_bal)) {
                 return 0.0; // dados embutidos stale — quotes não confiáveis
