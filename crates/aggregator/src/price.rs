@@ -78,15 +78,15 @@ pub async fn fetch_sol_usd_onchain(rpc: &RpcClient) -> Option<f64> {
         filters: Some(vec![
             solana_rpc_client_api::filter::RpcFilterType::DataSize(1544),
             solana_rpc_client_api::filter::RpcFilterType::Memcmp(
-                solana_rpc_client_api::filter::Memcmp::new_raw_bytes(
+                solana_rpc_client_api::filter::Memcmp::new_base58_encoded(
                     CLMM_MINT_0_OFFSET,
-                    wsol.to_bytes().to_vec(),
+                    &wsol.to_bytes(),
                 ),
             ),
             solana_rpc_client_api::filter::RpcFilterType::Memcmp(
-                solana_rpc_client_api::filter::Memcmp::new_raw_bytes(
+                solana_rpc_client_api::filter::Memcmp::new_base58_encoded(
                     CLMM_MINT_1_OFFSET,
-                    usdc.to_bytes().to_vec(),
+                    &usdc.to_bytes(),
                 ),
             ),
         ]),

@@ -492,7 +492,7 @@ impl PoolLoader {
                 filters.push(RpcFilterType::DataSize(data_size));
             }
             if let Some(disc) = &desc.discriminator {
-                filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+                filters.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, disc)));
             }
 
             // Capped loads (`PoolLoader::with_max_pools`, ex.: `--max-per-dex
@@ -584,7 +584,7 @@ impl PoolLoader {
             }
         }
         if let Some(disc) = &desc.discriminator {
-            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, disc)));
         }
         let gpa = |offset: usize, length: usize| {
             let config = RpcProgramAccountsConfig {
@@ -668,7 +668,7 @@ impl PoolLoader {
             }
         }
         if let Some(disc) = &desc.discriminator {
-            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, disc)));
         }
 
         // pool -> por lado: (vault pubkey, preço/decimals do hub caso o mint
@@ -681,7 +681,7 @@ impl PoolLoader {
                 let Ok(hub) = Pubkey::from_str(hub_b58) else { continue };
                 for (side, (mint_off, vault_off)) in proxy.sides.iter().enumerate() {
                     let mut f = filters.clone();
-                    f.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(*mint_off, hub.as_ref().to_vec())));
+                    f.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(*mint_off, hub.as_ref())));
                     // dataSlice: só o pubkey do vault (32B) — memcmp já filtra
                     // pelo mint hub; o preço vem do loop.
                     let config = RpcProgramAccountsConfig {
@@ -828,7 +828,7 @@ impl PoolLoader {
             }
         }
         if let Some(disc) = &desc.discriminator {
-            filters.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, disc.to_vec())));
+            filters.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, disc)));
         }
 
         let mut scored: HashMap<Pubkey, f64> = HashMap::new();
@@ -851,9 +851,9 @@ impl PoolLoader {
             // (offset do mint, offset do amount correspondente no data slice)
             for (mint_off, amt_off) in [(off_a, 0usize), (off_b, 8usize)] {
                 let mut f = filters.clone();
-                f.push(RpcFilterType::Memcmp(Memcmp::new_raw_bytes(
+                f.push(RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
                     mint_off,
-                    hub.as_ref().to_vec(),
+                    hub.as_ref(),
                 )));
                 let config = RpcProgramAccountsConfig {
                     filters: Some(f),
