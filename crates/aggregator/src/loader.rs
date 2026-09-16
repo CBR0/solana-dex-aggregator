@@ -47,6 +47,18 @@ const BALANCE_BATCH_SIZE: usize = 100;
 const BALANCE_CONCURRENCY: usize = 20;
 const DEFAULT_MAX_POOLS_PER_DEX: usize = usize::MAX;
 
+/// Max concurrent `getMultipleAccounts` batches while fetching balances.
+/// Override with `SOLROUTE_CONCURRENCY` to fit strict RPC rate limits (e.g.
+/// Helius free tier ~10 RPS: use 4-5) without rebuilding. Ignored when unset
+/// or invalid; falls back to `BALANCE_CONCURRENCY`.
+fn balance_concurrency() -> usize {
+    std::env::var("SOLROUTE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(BALANCE_CONCURRENCY)
+}
+
 /// Convert a UI account from `get_program_ui_accounts_with_config` into a
 /// decoded `Account` — the shape the removed
 /// `get_program_ui_accounts_with_config` returned. Works for full blobs and
@@ -1045,7 +1057,7 @@ impl PoolLoader {
         let mut raw: Vec<(Pubkey, Account)> = Vec::with_capacity(addresses.len());
 
         let chunks: Vec<&[Pubkey]> = addresses.chunks(BALANCE_BATCH_SIZE).collect();
-        for window in chunks.chunks(BALANCE_CONCURRENCY) {
+        for window in chunks.chunks(balance_concurrency()) {
             let futures: Vec<_> = window
                 .iter()
                 .map(|chunk| self.rpc.get_multiple_accounts(chunk))
@@ -1381,7 +1393,7 @@ impl PoolLoader {
         let mut results: Vec<(Pubkey, Account)> = Vec::with_capacity(addresses.len());
         let chunks: Vec<&[Pubkey]> = addresses.chunks(BALANCE_BATCH_SIZE).collect();
 
-        for window in chunks.chunks(BALANCE_CONCURRENCY) {
+        for window in chunks.chunks(balance_concurrency()) {
             let futures: Vec<_> = window.iter()
                 .map(|chunk| self.rpc.get_multiple_accounts(chunk))
                 .collect();
@@ -1486,7 +1498,7 @@ impl PoolLoader {
         let chunks: Vec<(usize, &[Pubkey])> = keys.chunks(BALANCE_BATCH_SIZE).enumerate().collect();
         let done_counter = std::sync::atomic::AtomicUsize::new(0);
 
-        for window in chunks.chunks(BALANCE_CONCURRENCY) {
+        for window in chunks.chunks(balance_concurrency()) {
             let futures: Vec<_> = window.iter()
                 .map(|(_, chunk)| self.rpc.get_multiple_accounts(chunk))
                 .collect();
