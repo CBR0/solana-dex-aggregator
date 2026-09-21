@@ -22,6 +22,12 @@ pub const PROGRAM_ID: Pubkey = Pubkey::from_str_const("LBUZKhRxPF3XUpBCjp4YzTKgL
 
 /// `swap` discriminator = sha256("global:swap")[..8].
 pub const SWAP_DISCRIMINATOR: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
+/// `Swap2`: variante que aceita mints Token-2022 (e exige a conta do memo).
+pub const SWAP2_DISCRIMINATOR: [u8; 8] = [0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88];
+
+fn memo_program() -> Pubkey {
+    Pubkey::from_str_const("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+}
 
 /// Bins per bin-array account.
 const MAX_BIN_PER_ARRAY: i64 = 70;
@@ -82,8 +88,8 @@ pub fn build_swap(
         ixs.push(create_ata_idempotent(&leg.payer, &leg.payer, &leg.output_mint, &output_program));
     }
 
-    // 15 named accounts. Optional accounts (bitmap extension, host fee) are set
-    // to the program id as the None placeholder, matching the SDK.
+    // 17 named accounts no Swap2 (o Swap legado não aceita mints Token-2022).
+    // Optional accounts (bitmap extension, host fee) são o program id (None).
     let mut metas = vec![
         AccountMeta::new(accounts.lb_pair, false),                    // 0 lb_pair
         AccountMeta::new_readonly(PROGRAM_ID, false),                 // 1 bin_array_bitmap_extension (none)
@@ -98,8 +104,9 @@ pub fn build_swap(
         AccountMeta::new(leg.payer, true),                            // 10 user (signer)
         AccountMeta::new_readonly(accounts.token_x_program, false),   // 11 token_x_program
         AccountMeta::new_readonly(accounts.token_y_program, false),   // 12 token_y_program
-        AccountMeta::new_readonly(event_authority(), false),          // 13 event_authority
-        AccountMeta::new_readonly(PROGRAM_ID, false),                 // 14 program
+        AccountMeta::new_readonly(memo_program(), false),             // 13 memo_program (Swap2)
+        AccountMeta::new_readonly(event_authority(), false),          // 14 event_authority
+        AccountMeta::new_readonly(PROGRAM_ID, false),                 // 15 program
     ];
 
     // Bin arrays covering the active bin ± one array (writable remaining accounts).
@@ -108,9 +115,9 @@ pub fn build_swap(
         metas.push(AccountMeta::new(derive_bin_array(&accounts.lb_pair, idx), false));
     }
 
-    // data: [disc(8)][amount_in u64][min_amount_out u64]
-    let mut data = [0u8; 24];
-    data[..8].copy_from_slice(&SWAP_DISCRIMINATOR);
+    // data: [disc(8)][amount_in u64][min_amount_out u64][flags u32]
+    let mut data = [0u8; 28];
+    data[..8].copy_from_slice(&SWAP2_DISCRIMINATOR);
     data[8..16].copy_from_slice(&leg.amount_in.to_le_bytes());
     data[16..24].copy_from_slice(&leg.min_amount_out.to_le_bytes());
 
@@ -160,16 +167,17 @@ mod tests {
         let ixs = build_swap(&accounts(150), &leg(), &SwapOptions::default()).unwrap();
         let ix = ixs.last().unwrap();
         assert_eq!(ix.program_id, PROGRAM_ID);
-        assert_eq!(ix.accounts.len(), 18); // 15 named + 3 bin arrays
+        assert_eq!(ix.accounts.len(), 19); // 16 named (Swap2) + 3 bin arrays
         assert_eq!(ix.accounts[8].pubkey, pk(5)); // oracle
         assert_eq!(ix.accounts[10].pubkey, pk(9)); // user
         assert!(ix.accounts[10].is_signer);
-        assert_eq!(ix.accounts[14].pubkey, PROGRAM_ID);
+        assert_eq!(ix.accounts[13].pubkey, memo_program()); // memo (Swap2)
+        assert_eq!(ix.accounts[15].pubkey, PROGRAM_ID);
         // active_id 150 -> index 2; neighbors 1,2,3
-        assert_eq!(ix.accounts[15].pubkey, derive_bin_array(&pk(1), 1));
-        assert_eq!(ix.accounts[16].pubkey, derive_bin_array(&pk(1), 2));
-        assert_eq!(ix.accounts[17].pubkey, derive_bin_array(&pk(1), 3));
-        assert_eq!(&ix.data[..8], &SWAP_DISCRIMINATOR);
+        assert_eq!(ix.accounts[16].pubkey, derive_bin_array(&pk(1), 1));
+        assert_eq!(ix.accounts[17].pubkey, derive_bin_array(&pk(1), 2));
+        assert_eq!(ix.accounts[18].pubkey, derive_bin_array(&pk(1), 3));
+        assert_eq!(&ix.data[..8], &SWAP2_DISCRIMINATOR);
         assert_eq!(u64::from_le_bytes(ix.data[8..16].try_into().unwrap()), 1_000_000);
     }
 
