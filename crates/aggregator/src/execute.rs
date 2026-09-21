@@ -45,22 +45,39 @@ fn min_out_with_slippage(quoted_out: u64, slippage_bps: u64) -> u64 {
 /// mint account owner. One `getMultipleAccounts` for all mints; anything that
 /// isn't a recognized token program (or fails to fetch) falls back to legacy
 /// SPL Token. This is what makes Token-2022 pools executable.
-async fn resolve_token_programs(rpc: &RpcClient, mints: &[Pubkey]) -> Vec<Pubkey> {
+/// Programa de token (legacy/2022) de cada mint, na ordem pedida.
+///
+/// **Nunca** degrada em silêncio: se o RPC falhar ou algum mint tiver owner
+/// desconhecido, propaga erro — antes um `unwrap_or_default()` fazia todos os
+/// mints caírem em Tokenkeg e a tx era montada com o programa errado
+/// (`InvalidProgramId` na DLMM/DEX para mints Token-2022).
+async fn resolve_token_programs(
+    rpc: &RpcClient,
+    mints: &[Pubkey],
+) -> Result<Vec<Pubkey>, GenericError> {
     let legacy = Pubkey::from_str_const(TOKEN_PROGRAM);
     let token_2022 = Pubkey::from_str_const(TOKEN_PROGRAM_2022);
-    let accounts = rpc.get_multiple_accounts(mints).await.unwrap_or_default();
-    mints
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            accounts
-                .get(i)
-                .and_then(|maybe| maybe.as_ref())
-                .map(|acc| acc.owner)
-                .filter(|owner| *owner == legacy || *owner == token_2022)
-                .unwrap_or(legacy)
-        })
-        .collect()
+    let accounts = rpc
+        .get_multiple_accounts(mints)
+        .await
+        .map_err(|e| format!("resolve_token_programs: getMultipleAccounts falhou: {e}"))?;
+    let mut out = Vec::with_capacity(mints.len());
+    for (i, mint) in mints.iter().enumerate() {
+        let owner = accounts
+            .get(i)
+            .and_then(|maybe| maybe.as_ref())
+            .map(|acc| acc.owner)
+            .ok_or_else(|| format!("resolve_token_programs: mint {mint} sem conta"))?;
+        if owner == legacy || owner == token_2022 {
+            out.push(owner);
+        } else {
+            return Err(format!(
+                "resolve_token_programs: mint {mint} com owner inesperado {owner}"
+            )
+            .into());
+        }
+    }
+    Ok(out)
 }
 
 /// Observe bonk.fun's two fee-vault remaining accounts (platform + creator, both
@@ -164,7 +181,7 @@ pub async fn build_hop_instructions(
             orca_exec::build_swap(&pool, pool_pubkey, &leg, opts)
         }
         CachedPool::MeteoraDAMMV2 { pool, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.token_a_mint, pool.token_b_mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.token_a_mint, pool.token_b_mint]).await?;
             let accounts = DammV2Accounts {
                 pool: pool_pubkey,
                 token_a_mint: pool.token_a_mint,
@@ -177,7 +194,7 @@ pub async fn build_hop_instructions(
             meteora_damm_v2::build_swap(&accounts, &leg, None, opts)
         }
         CachedPool::PumpfunAmm { pool, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await?;
             let accounts = PumpSwapAccounts {
                 pool: pool_pubkey,
                 base_mint: pool.base_mint,
@@ -194,7 +211,7 @@ pub async fn build_hop_instructions(
         }
         CachedPool::PumpfunBondingCurve { pool, .. } => {
             // Only the token side has a mint account; SOL settles natively.
-            let progs = resolve_token_programs(rpc, &[pool.mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.mint]).await?;
             let accounts = PumpBcAccounts {
                 mint: pool.mint,
                 bonding_curve: pool.bonding_curve,
@@ -203,7 +220,7 @@ pub async fn build_hop_instructions(
             pumpfun_bc::build_swap(&accounts, &leg, progs[0], opts)
         }
         CachedPool::MeteoraDBC { pool, config, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.base_mint, config.quote_mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, config.quote_mint]).await?;
             let accounts = DbcAccounts {
                 pool: pool_pubkey,
                 config: pool.config,
@@ -223,7 +240,7 @@ pub async fn build_hop_instructions(
                 .ok_or_else(|| GenericError::from(
                     "bonk: could not observe fee vaults from a recent swap on this pool",
                 ))?;
-            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.base_mint, pool.quote_mint]).await?;
             let accounts = BonkAccounts {
                 pool_state: pool_pubkey,
                 global_config: pool.global_config,
@@ -263,7 +280,7 @@ pub async fn build_hop_instructions(
             meteora_damm_v1::build_swap(&accounts, &leg, opts)
         }
         CachedPool::MeteoraDLMM { pool, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.token_x_mint, pool.token_y_mint]).await;
+            let progs = resolve_token_programs(rpc, &[pool.token_x_mint, pool.token_y_mint]).await?;
             let accounts = DlmmAccounts {
                 lb_pair: pool_pubkey,
                 token_x_mint: pool.token_x_mint,
@@ -278,7 +295,7 @@ pub async fn build_hop_instructions(
             meteora_dlmm::build_swap(&accounts, &leg, opts)
         }
         CachedPool::RaydiumClmm { pool, .. } => {
-            let progs = resolve_token_programs(rpc, &[pool.token_mint_0, pool.token_mint_1]).await;
+            let progs = resolve_token_programs(rpc, &[pool.token_mint_0, pool.token_mint_1]).await?;
             let (in_prog, out_prog) = if leg.input_mint == pool.token_mint_0 {
                 (progs[0], progs[1])
             } else {
