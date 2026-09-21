@@ -186,9 +186,9 @@ mod tests {
         // active_id -1 -> div_euclid(70) = -1, neighbors -2,-1,0
         let ixs = build_swap(&accounts(-1), &leg(), &SwapOptions::default()).unwrap();
         let ix = ixs.last().unwrap();
-        assert_eq!(ix.accounts[15].pubkey, derive_bin_array(&pk(1), -2));
-        assert_eq!(ix.accounts[16].pubkey, derive_bin_array(&pk(1), -1));
-        assert_eq!(ix.accounts[17].pubkey, derive_bin_array(&pk(1), 0));
+        assert_eq!(ix.accounts[16].pubkey, derive_bin_array(&pk(1), -2));
+        assert_eq!(ix.accounts[17].pubkey, derive_bin_array(&pk(1), -1));
+        assert_eq!(ix.accounts[18].pubkey, derive_bin_array(&pk(1), 0));
     }
 
     #[test]
