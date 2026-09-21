@@ -4,7 +4,8 @@ use solana_pubkey::Pubkey;
 
 use solroute_core::{
     GenericError, Market, PoolFees, PoolFinancials, PoolMetadata,
-    SwapDirection, WSOL, calculate_price_impact_bps, infer_mint_decimals,
+    SwapDirection, WSOL, calculate_price_impact_bps, constant_product_swap,
+    infer_mint_decimals,
 };
 
 
@@ -167,6 +168,36 @@ impl Market for PumpfunAmmMarket {
         // Pumpfun swap data lives in the bonding curve account, not the pool account.
         // Live bonding curve updates would require a separate account mapping.
         self.calculate_bonding_curve_output(amount_in, direction)
+    }
+
+    /// Preço live do PumpSwap AMM: CPMM sobre os **vaults** (frescos do store).
+    ///
+    /// O pool account do pump_amm NÃO tem reservas — elas vivem nos dois vaults.
+    /// O `bonding_curve` embutido no cache (sintetizado no load) serve só para
+    /// screening (`financials`/`calculate_output`); a verificação exata chama
+    /// este método com os saldos ao vivo do AccountStore.
+    fn calculate_output_live_ex(
+        &self,
+        amount_in: u64,
+        direction: SwapDirection,
+        _pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+        base_vault_balance: u64,
+        _provider: &dyn solroute_core::AccountDataProvider,
+    ) -> Result<u64, GenericError> {
+        if quote_vault_balance == 0 || base_vault_balance == 0 {
+            // Sem dado fresco: cai no snapshot do load.
+            return self.calculate_bonding_curve_output(amount_in, direction);
+        }
+        const FEE_BPS: u64 = 100;
+        match direction {
+            SwapDirection::Buy => {
+                constant_product_swap(quote_vault_balance, base_vault_balance, amount_in, FEE_BPS)
+            }
+            SwapDirection::Sell => {
+                constant_product_swap(base_vault_balance, quote_vault_balance, amount_in, FEE_BPS)
+            }
+        }
     }
 
     fn calculate_price_impact(

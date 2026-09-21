@@ -29,8 +29,8 @@ use meteora_dbc::{
     DISC_VIRTUAL_POOL, METEORA_DBC_PROGRAM,
 };
 use pumpfun_amm::{
-    derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurvePool,
-    PUMPFUN_AMM_PROGRAM,
+    derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurve,
+    PumpfunBondingCurvePool, PUMPFUN_AMM_PROGRAM,
 };
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
 use orca_whirlpool::{WhirlpoolPool, DISC_WHIRLPOOL, ORCA_WHIRLPOOL_PROGRAM, WHIRLPOOL_LEN};
@@ -1213,11 +1213,40 @@ impl PoolLoader {
     async fn build_pumpfun(&self, accounts: Vec<(Pubkey, Account)>, cb: &ProgressCallback) -> Result<Vec<(String, PoolEntry)>, GenericError> {
         let dex = "Pumpfun AMM";
         let total = accounts.len();
-        let mut entries = Vec::new();
-        for (i, (pubkey, account)) in accounts.iter().enumerate() {
+        let mut pools: Vec<(String, PumpfunAmmPool)> = Vec::new();
+        for (pubkey, account) in &accounts {
             if let Ok(pool) = deser_anchor::<PumpfunAmmPool>(&account.data) {
-                entries.push(CachedPool::PumpfunAmm { addr: pubkey.to_string(), pool }.into_pool_entry());
+                pools.push((pubkey.to_string(), pool));
             }
+        }
+
+        // O AMM do PumpSwap NÃO guarda reservas no pool account: elas vivem nos
+        // dois vaults. O market precifica por CPMM nos vaults, e o
+        // `bonding_curve` (campo `#[borsh(skip)]`, serializado no cache) é
+        // sintetizado aqui com os saldos dos vaults para o screening
+        // (`financials`/`calculate_output`). A verificação exata usa o path
+        // live (`calculate_output_live_ex`) com os saldos do stream.
+        let vault_keys: Vec<Pubkey> = pools
+            .iter()
+            .flat_map(|(_, p)| [p.pool_base_token_account, p.pool_quote_token_account])
+            .collect();
+        cb(progress(dex, LoadPhase::FetchingBalances { done: 0, total: pools.len() }));
+        let balances = self.batch_fetch_balances(&vault_keys, dex, cb).await?;
+
+        let mut entries = Vec::with_capacity(pools.len());
+        for (i, (addr, mut pool)) in pools.into_iter().enumerate() {
+            let base_bal = balances[i * 2];
+            let quote_bal = balances[i * 2 + 1];
+            pool.bonding_curve = Some(PumpfunBondingCurve {
+                virtual_token_reserves: base_bal,
+                virtual_sol_reserves: quote_bal,
+                real_token_reserves: base_bal,
+                real_sol_reserves: quote_bal,
+                token_total_supply: pool.lp_supply,
+                complete: true,
+                creator: pool.coin_creator,
+            });
+            entries.push(CachedPool::PumpfunAmm { addr, pool }.into_pool_entry());
             if (i + 1) % 5000 == 0 || i + 1 == total {
                 cb(progress(dex, LoadPhase::BuildingMarkets { done: i + 1, total }));
             }
