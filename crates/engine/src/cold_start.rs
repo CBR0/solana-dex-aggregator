@@ -540,7 +540,13 @@ pub async fn refresh_hot_vaults_loop(
         let mut ranked: Vec<(u128, &crate::pool_registry::PoolInfo)> = reg
             .iter_pools()
             .filter(|(_, info)| {
-                info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
+                // Mesmos venues do `vault_list_filters` (streaming.rs): os que
+                // precificam/limitam pelo saldo dos vaults. Pumpfun AMM é o
+                // caso crítico — o pool account não tem reservas.
+                matches!(
+                    info.dex_name.as_str(),
+                    "Raydium AMM V4" | "Meteora DAMM V1" | "Pumpfun AMM" | "Meteora DLMM"
+                )
             })
             .filter_map(|(_, info)| Some((info.market.financials().ok()?.quote_balance as u128, info)))
             .collect();

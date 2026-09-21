@@ -51,8 +51,11 @@ const ACCOUNT_SUBS: &[(&str, &str, Shape)] = &[
 ];
 
 /// Top-N pools (by cached vault balance) whose vault token accounts get
-/// explicit account-list subscriptions. Only Raydium V4 and DAMM V1 price
-/// off vault balances; the other venues carry price in the pool account.
+/// explicit account-list subscriptions. Venues que precisam de saldo de vault
+/// fresco no quote: Raydium V4 e DAMM V1 (preço pelos vaults) e **Pumpfun AMM**
+/// (o pool account não guarda reservas — o preço É a razão dos vaults). DLMM
+/// também entra: o preço vem do bin ativo, mas o cap de reserva da quote lê os
+/// vaults. Orca/CLMM trazem preço no pool account (sqrt/tick) e não precisam.
 const VAULT_LIST_POOLS: usize = 15_000;
 /// Keys per named account-list filter (bounds per-filter request size).
 const VAULT_LIST_CHUNK: usize = 5_000;
@@ -66,7 +69,10 @@ fn vault_list_filters(
     let mut ranked: Vec<(u128, String, String, Option<(String, String)>)> = registry
         .iter_pools()
         .filter(|(_, info)| {
-            info.dex_name == "Raydium AMM V4" || info.dex_name == "Meteora DAMM V1"
+            matches!(
+                info.dex_name.as_str(),
+                "Raydium AMM V4" | "Meteora DAMM V1" | "Pumpfun AMM" | "Meteora DLMM"
+            )
         })
         .filter_map(|(_, info)| {
             // Rank by the quote (settlement) side only — see cold_start
