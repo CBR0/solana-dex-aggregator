@@ -376,6 +376,20 @@ pub async fn fetch_dlmm_bin_arrays(
         if info.bitmap_ext.is_some() {
             continue;
         }
+        // Store-first: deriva do pool account fresco (fetch_pool_accounts) — o
+        // `active_id` do cache pode estar dias velho e apontar para outra array
+        // (quote falhava com "DLMM bin arrays unavailable"). Busca também as
+        // arrays vizinhas: um swap que cruza a fronteira do bin precisa delas.
+        let from_store = info.address.parse::<Pubkey>().ok().and_then(|pk| {
+            store.get_data(&pk).and_then(|d| {
+                solroute_aggregator::cache::dlmm_bin_pdas_from_account(&pk, &d)
+            })
+        });
+        if let Some((active, pdas)) = from_store {
+            pda_map.insert(addr.to_string(), active);
+            all_pdas.extend(pdas);
+            continue;
+        }
         if let Some((_pool_pk, pda)) = solroute_aggregator::cache::extract_dlmm_bin_pda(&info.cached_data) {
             pda_map.insert(addr.to_string(), pda);
             all_pdas.push(pda);

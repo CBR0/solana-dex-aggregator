@@ -210,6 +210,34 @@ pub fn extract_dlmm_bin_pda(cached_data: &[u8]) -> Option<(Pubkey, Pubkey)> {
     }
 }
 
+/// Derive the active bin-array PDA for a DLMM pool from **live pool-account
+/// bytes** (8-byte disc + borsh). Same seeds as `extract_dlmm_bin_pda`, but
+/// reads the current `active_id` — the cached struct can be days old while the
+/// pool's active bin has moved, which would fetch the wrong array.
+///
+/// Returns `(active_pda, [neighbor_lo, active, neighbor_hi])`: swaps crossing a
+/// bin boundary need the adjacent arrays too.
+pub fn dlmm_bin_pdas_from_account(
+    pool_pubkey: &Pubkey,
+    data: &[u8],
+) -> Option<(Pubkey, Vec<Pubkey>)> {
+    if data.len() <= 8 {
+        return None;
+    }
+    let pool = <MeteoraDLMMPool as borsh::BorshDeserialize>::deserialize(&mut &data[8..]).ok()?;
+    let index = (pool.active_id as i64).div_euclid(70);
+    let dlmm_program = Pubkey::from_str_const(meteora_dlmm::METEORA_DYNAMIC_LMM);
+    let derive = |i: i64| {
+        Pubkey::find_program_address(
+            &[b"bin_array", pool_pubkey.as_ref(), &i.to_le_bytes()],
+            &dlmm_program,
+        )
+        .0
+    };
+    let active = derive(index);
+    Some((active, vec![derive(index - 1), active, derive(index + 1)]))
+}
+
 /// Extract tick array PDAs around the current tick for an Orca Whirlpool.
 /// Returns the current array plus one neighbor in each direction, covering
 /// near-price swaps both ways. None for non-Whirlpool pools.
