@@ -93,18 +93,16 @@ pub async fn fetch_all_vaults(
     registry: &PoolRegistry,
     store: &AccountStore,
 ) {
-    // Pumpfun AMM prices from virtual reserves in the pool account, not vault
-    // balances — its calculate_output_live ignores them and it is always
-    // swappable (no vault-funding gate). Skip its vaults: ~1M pools / ~2M
-    // accounts of pure waste in the cold-start fetch.
+    // Pumpfun AMM prices from `vault_quote + Pool::virtual_quote_reserves`, so
+    // its vaults are required for the exact quote. The virtual part lives in
+    // the pool account (see fetch_pump_amm_aux + the hot-vault poll).
     let vault_keys: Vec<Pubkey> = registry
         .iter_pools()
-        .filter(|(_, info)| info.dex_name != "Pumpfun AMM")
         .flat_map(|(_, info)| [info.quote_vault, info.base_vault])
         .collect();
 
     let total = vault_keys.len();
-    println!("[cold_start] fetching {} vault accounts (Pumpfun vaults skipped)", total);
+    println!("[cold_start] fetching {total} vault accounts");
 
     let chunks: Vec<(usize, &[Pubkey])> = vault_keys.chunks(BATCH_SIZE).enumerate().collect();
     let mut fetched = 0usize;
@@ -178,6 +176,70 @@ pub async fn fetch_pool_accounts(
     println!("[cold_start] fetching {total} pool accounts");
     let fetched = fetch_batch_into_store(rpc, store, &pool_keys).await;
     println!("[cold_start] pool accounts: {fetched}/{total} stored");
+}
+
+/// Fetch the accounts the PumpSwap exact quote reads besides pool + vaults:
+/// the pump-fees `FeeConfig` (fee tiers), the pump-amm `GlobalConfig`
+/// (`creator_fee_configurable`) and each pool's base mint (supply → market-cap
+/// tier). Two shared accounts + one per PumpSwap pool.
+pub async fn fetch_pump_amm_aux(
+    rpc: &RpcClient,
+    registry: &PoolRegistry,
+    store: &AccountStore,
+) {
+    let mut keys: Vec<Pubkey> = vec![
+        Pubkey::from_str_const(pumpfun_amm::PUMP_AMM_FEE_CONFIG),
+        Pubkey::from_str_const(pumpfun_amm::PUMP_AMM_GLOBAL_CONFIG),
+    ];
+    keys.extend(
+        registry
+            .iter_pools()
+            .filter(|(_, info)| info.dex_name == "Pumpfun AMM")
+            .map(|(_, info)| info.base_mint),
+    );
+    keys.sort_unstable();
+    keys.dedup();
+    let total = keys.len();
+    if total <= 2 {
+        return;
+    }
+    println!("[cold_start] fetching {total} pump-amm aux accounts (fee/global config + mints)");
+
+    let chunks: Vec<(usize, &[Pubkey])> = keys.chunks(BATCH_SIZE).enumerate().collect();
+    let mut fetched = 0usize;
+    for window in chunks.chunks(BATCH_CONCURRENCY) {
+        let futures: Vec<_> = window
+            .iter()
+            .map(|(_, chunk)| {
+                fetch_accounts_retry(|| {
+                    rpc.get_multiple_accounts_with_commitment(
+                        chunk,
+                        CommitmentConfig::confirmed(),
+                    )
+                })
+            })
+            .collect();
+        let results = join_all(futures).await;
+
+        for ((_, chunk), result) in window.iter().zip(results) {
+            if let Some(response) = result {
+                let slot = response.context.slot;
+                for (pubkey, maybe_account) in chunk.iter().zip(response.value) {
+                    if let Some(account) = maybe_account {
+                        store.upsert(
+                            *pubkey,
+                            account.data,
+                            account.owner,
+                            account.lamports,
+                            slot,
+                        );
+                        fetched += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("[cold_start] pump-amm aux: {fetched}/{total} stored");
 }
 
 /// Fetch CLMM tick arrays by deriving PDAs from each pool's bitmap, then
@@ -557,6 +619,14 @@ pub async fn refresh_hot_vaults_loop(
         for (_, info) in ranked {
             ks.push(info.quote_vault);
             ks.push(info.base_vault);
+            // PumpSwap prices from vault_quote + Pool::virtual_quote_reserves:
+            // the pool account carries the virtual part (boost ops) and must
+            // stay fresh as well.
+            if info.dex_name == "Pumpfun AMM" {
+                if let Ok(pk) = info.address.parse::<Pubkey>() {
+                    ks.push(pk);
+                }
+            }
             // DAMM V1's exact quote also reads the dynamic-vault STATE
             // accounts, the pool's vault-LP token accounts, and the vault LP
             // mints (for the LP-share -> token conversion). These don't stream
@@ -572,6 +642,10 @@ pub async fn refresh_hot_vaults_loop(
                 }
             }
         }
+        // pump-fees FeeConfig + pump-amm GlobalConfig: shared inputs of every
+        // PumpSwap quote (fee tiers, creator_fee_configurable).
+        ks.push(Pubkey::from_str_const(pumpfun_amm::PUMP_AMM_FEE_CONFIG));
+        ks.push(Pubkey::from_str_const(pumpfun_amm::PUMP_AMM_GLOBAL_CONFIG));
         ks.sort_unstable();
         ks.dedup();
         ks
@@ -723,6 +797,9 @@ pub async fn cold_start(
     // 1b. Pool accounts (sqrt/liquidity) — sem isso pools quietas caem no
     // struct cacheado stale (ver fetch_pool_accounts).
     fetch_pool_accounts(rpc, registry, store).await;
+
+    // 1c. Pump-amm aux: fee/global config + base mints (market-cap tier).
+    fetch_pump_amm_aux(rpc, registry, store).await;
 
     // 2. Bitmap extensions (fast, ~43 accounts).
     fetch_bitmap_extensions(rpc, registry, store).await;

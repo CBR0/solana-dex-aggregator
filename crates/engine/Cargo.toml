@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 solroute-core = { path = "../core" }
 solroute-aggregator = { path = "../aggregator" }
+pumpfun-amm = { path = "../pumpfun-amm" }
 solana-pubkey = { workspace = true }
 solana-account = { workspace = true }
 solana-rpc-client = "4"

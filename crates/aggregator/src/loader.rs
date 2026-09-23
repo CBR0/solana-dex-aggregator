@@ -29,8 +29,10 @@ use meteora_dbc::{
     DISC_VIRTUAL_POOL, METEORA_DBC_PROGRAM,
 };
 use pumpfun_amm::{
-    derive_bonding_curve_pda, parse_bonding_curve, PumpfunAmmPool, PumpfunBondingCurve,
-    PumpfunBondingCurvePool, PUMPFUN_AMM_PROGRAM,
+    compute_fees_bps, derive_bonding_curve_pda, parse_bonding_curve, parse_fee_config,
+    parse_global_config, read_mint_supply, read_pool_extras, FeeInputs, PumpfunAmmPool,
+    PumpfunBondingCurve, PumpfunBondingCurvePool, PUMPFUN_AMM_PROGRAM, PUMP_AMM_FEE_CONFIG,
+    PUMP_AMM_GLOBAL_CONFIG,
 };
 use raydium_amm_v4::{RaydiumAMMV4, RAYDIUM_LIQUIDITY_POOL_V4};
 use orca_whirlpool::{WhirlpoolPool, DISC_WHIRLPOOL, ORCA_WHIRLPOOL_PROGRAM, WHIRLPOOL_LEN};
@@ -1214,18 +1216,42 @@ impl PoolLoader {
         let dex = "Pumpfun AMM";
         let total = accounts.len();
         let mut pools: Vec<(String, PumpfunAmmPool)> = Vec::new();
+        // Appended pool fields (virtual_quote_reserves / creator_fee_bps) live
+        // past the borsh prefix — parse them from the raw account bytes.
+        let mut extras: std::collections::HashMap<String, (i128, u64)> =
+            std::collections::HashMap::new();
         for (pubkey, account) in &accounts {
             if let Ok(pool) = deser_anchor::<PumpfunAmmPool>(&account.data) {
+                extras.insert(pubkey.to_string(), read_pool_extras(&account.data));
                 pools.push((pubkey.to_string(), pool));
             }
         }
 
         // O AMM do PumpSwap NÃO guarda reservas no pool account: elas vivem nos
-        // dois vaults. O market precifica por CPMM nos vaults, e o
+        // dois vaults — e o preço é `vault_quote + virtual_quote_reserves`
+        // (campo anexado, pools "boost"). O market precifica por CPMM exato nos
+        // vaults + V, com a fee por faixa de market cap do `FeeConfig`; o
         // `bonding_curve` (campo `#[borsh(skip)]`, serializado no cache) é
         // sintetizado aqui com os saldos dos vaults para o screening
-        // (`financials`/`calculate_output`). A verificação exata usa o path
-        // live (`calculate_output_live_ex`) com os saldos do stream.
+        // (`financials`/`calculate_output`/`current_price`). A verificação
+        // exata usa o path live (`calculate_output_live_ex`) com os saldos do
+        // stream e as contas de fee.
+        let fee_config = self
+            .fetch_account_data(&Pubkey::from_str_const(PUMP_AMM_FEE_CONFIG))
+            .await
+            .and_then(|d| parse_fee_config(&d));
+        let global_config = self
+            .fetch_account_data(&Pubkey::from_str_const(PUMP_AMM_GLOBAL_CONFIG))
+            .await
+            .and_then(|d| parse_global_config(&d));
+        if fee_config.is_none() || global_config.is_none() {
+            println!(
+                "[pumpfun-amm] configs de fee indisponíveis no load (fee_config={} global_config={}) — screening usará fallback conservador",
+                fee_config.is_some(),
+                global_config.is_some()
+            );
+        }
+
         let vault_keys: Vec<Pubkey> = pools
             .iter()
             .flat_map(|(_, p)| [p.pool_base_token_account, p.pool_quote_token_account])
@@ -1233,13 +1259,41 @@ impl PoolLoader {
         cb(progress(dex, LoadPhase::FetchingBalances { done: 0, total: pools.len() }));
         let balances = self.batch_fetch_balances(&vault_keys, dex, cb).await?;
 
+        // Mint supply por pool: insumo do tier de fee (market cap).
+        let mint_keys: Vec<Pubkey> = pools.iter().map(|(_, p)| p.base_mint).collect();
+        let mint_data = self.batch_fetch_account_data(&mint_keys).await;
+
         let mut entries = Vec::with_capacity(pools.len());
         for (i, (addr, mut pool)) in pools.into_iter().enumerate() {
             let base_bal = balances[i * 2];
             let quote_bal = balances[i * 2 + 1];
+            let (virtual_quote, creator_fee_bps) =
+                extras.get(&addr).copied().unwrap_or((0, 0));
+            let virtual_quote = virtual_quote.max(0) as u128;
+            let effective_quote = quote_bal as u128 + virtual_quote;
+            let supply = mint_data
+                .get(i)
+                .and_then(|d| d.as_deref())
+                .and_then(read_mint_supply);
+            pool.screening_fee_bps = compute_fees_bps(&FeeInputs {
+                fee_config: fee_config.as_ref(),
+                global_config: global_config.as_ref(),
+                base_mint: &pool.base_mint,
+                pool_creator: &pool.creator,
+                quote_mint: &pool.quote_mint,
+                pool_creator_fee_bps: creator_fee_bps,
+                base_mint_supply: supply,
+                base_reserve: base_bal,
+                effective_quote_reserve: effective_quote,
+                is_mayhem_mode: pool.is_mayhem_mode,
+                coin_creator_default: pool.coin_creator == Pubkey::default(),
+            })
+            .map(|f| f.total_bps());
+            pool.virtual_quote_reserves = virtual_quote as i128;
+            pool.creator_fee_bps = creator_fee_bps;
             pool.bonding_curve = Some(PumpfunBondingCurve {
                 virtual_token_reserves: base_bal,
-                virtual_sol_reserves: quote_bal,
+                virtual_sol_reserves: effective_quote.min(u64::MAX as u128) as u64,
                 real_token_reserves: base_bal,
                 real_sol_reserves: quote_bal,
                 token_total_supply: pool.lp_supply,
@@ -1561,6 +1615,39 @@ impl PoolLoader {
         }
 
         Ok(balances)
+    }
+
+    /// Fetch a single account's raw data (None on error/missing).
+    async fn fetch_account_data(&self, key: &Pubkey) -> Option<Vec<u8>> {
+        self.rpc
+            .get_multiple_accounts(&[*key])
+            .await
+            .ok()
+            .and_then(|mut v| v.pop())
+            .flatten()
+            .map(|a| a.data)
+    }
+
+    /// Batch-fetch raw account data (order preserved; `None` for missing/error).
+    async fn batch_fetch_account_data(&self, keys: &[Pubkey]) -> Vec<Option<Vec<u8>>> {
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
+        let chunks: Vec<(usize, &[Pubkey])> = keys.chunks(BALANCE_BATCH_SIZE).enumerate().collect();
+        for window in chunks.chunks(balance_concurrency()) {
+            let futures: Vec<_> = window
+                .iter()
+                .map(|(_, chunk)| self.rpc.get_multiple_accounts(chunk))
+                .collect();
+            let results = futures::future::join_all(futures).await;
+            for ((chunk_idx, _), result) in window.iter().zip(results) {
+                if let Ok(accounts) = result {
+                    let base = chunk_idx * BALANCE_BATCH_SIZE;
+                    for (j, maybe_account) in accounts.into_iter().enumerate() {
+                        out[base + j] = maybe_account.map(|a| a.data);
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

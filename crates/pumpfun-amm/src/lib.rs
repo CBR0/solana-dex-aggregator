@@ -4,8 +4,15 @@ use solana_pubkey::Pubkey;
 
 use solroute_core::{
     GenericError, Market, PoolFees, PoolFinancials, PoolMetadata,
-    SwapDirection, WSOL, calculate_price_impact_bps, constant_product_swap,
+    SwapDirection, WSOL, calculate_price_impact_bps,
     infer_mint_decimals,
+};
+
+pub mod pump_fees;
+pub use pump_fees::{
+    buy_exact_quote_in, compute_fees_bps, parse_fee_config, parse_global_config,
+    read_mint_supply, read_pool_extras, sell_base_in, FeeConfig, FeeInputs, Fees, GlobalConfig,
+    FALLBACK_FEES, PUMP_AMM_FEE_CONFIG, PUMP_AMM_GLOBAL_CONFIG,
 };
 
 
@@ -46,6 +53,23 @@ pub struct PumpfunAmmPool {
     pub coin_creator: Pubkey,
     pub is_mayhem_mode: bool,
     pub is_cashback_coin: bool,
+    /// Appended `Pool::virtual_quote_reserves` (i128). Quotes price against
+    /// `vault_quote + virtual_quote_reserves`. Appended after the legacy borsh
+    /// layout, so it is parsed from raw account bytes (see [`read_pool_extras`])
+    /// and kept out of the bincode cache (the synthesized `bonding_curve`
+    /// already bakes it into `virtual_sol_reserves`).
+    #[borsh(skip)]
+    #[serde(skip)]
+    pub virtual_quote_reserves: i128,
+    /// Appended `Pool::creator_fee_bps` (u64; 0 = schedule default).
+    #[borsh(skip)]
+    #[serde(skip)]
+    pub creator_fee_bps: u64,
+    /// Total fee bps resolved at load time — screening/display only; the live
+    /// quote recomputes from the on-chain `FeeConfig`.
+    #[borsh(skip)]
+    #[serde(skip)]
+    pub screening_fee_bps: Option<u64>,
     /// Bonding curve data — fetched separately, not part of pool account borsh layout
     #[borsh(skip)]
     #[serde(default)]
@@ -69,48 +93,103 @@ impl PumpfunAmmMarket {
         Self { pool, pool_address, base_decimals }
     }
 
-    /// Calculate bonding curve output using virtual reserves and constant-product formula.
-    fn calculate_bonding_curve_output(
+    /// Effective quote reserves for a quote: raw vault balance plus the pool's
+    /// appended `virtual_quote_reserves` (boost pools carry tens of SOL here).
+    fn effective_quote_reserve(
+        &self,
+        pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+    ) -> u128 {
+        let virtual_quote = match pool_data {
+            Some(data) => read_pool_extras(data).0,
+            None => self.pool.virtual_quote_reserves,
+        };
+        quote_vault_balance as u128 + virtual_quote.max(0) as u128
+    }
+
+    /// `Pool::creator_fee_bps` from fresh bytes, falling back to the loaded value.
+    fn creator_fee_bps(&self, pool_data: Option<&[u8]>) -> u64 {
+        match pool_data {
+            Some(data) => read_pool_extras(data).1,
+            None => self.pool.creator_fee_bps,
+        }
+    }
+
+    /// Exact fee schedule from the on-chain `FeeConfig`/`GlobalConfig` + mint
+    /// supply, all served by `provider` (store or fresh RPC overlay). Falls back
+    /// to the conservative [`FALLBACK_FEES`] when any account is missing — never
+    /// the legacy flat 100 bps.
+    fn resolve_fees(
+        &self,
+        provider: &dyn solroute_core::AccountDataProvider,
+        base_reserve: u64,
+        effective_quote_reserve: u128,
+        pool_creator_fee_bps: u64,
+    ) -> Fees {
+        let fee_config = provider
+            .pool_account_data(&Pubkey::from_str_const(PUMP_AMM_FEE_CONFIG))
+            .and_then(|d| parse_fee_config(&d));
+        let global_config = provider
+            .pool_account_data(&Pubkey::from_str_const(PUMP_AMM_GLOBAL_CONFIG))
+            .and_then(|d| parse_global_config(&d));
+        let supply = provider
+            .pool_account_data(&self.pool.base_mint)
+            .and_then(|d| read_mint_supply(&d));
+        let inputs = FeeInputs {
+            fee_config: fee_config.as_ref(),
+            global_config: global_config.as_ref(),
+            base_mint: &self.pool.base_mint,
+            pool_creator: &self.pool.creator,
+            quote_mint: &self.pool.quote_mint,
+            pool_creator_fee_bps,
+            base_mint_supply: supply,
+            base_reserve,
+            effective_quote_reserve,
+            is_mayhem_mode: self.pool.is_mayhem_mode,
+            coin_creator_default: self.pool.coin_creator == Pubkey::default(),
+        };
+        compute_fees_bps(&inputs).unwrap_or_else(|| self.fallback_fees())
+    }
+
+    fn fallback_fees(&self) -> Fees {
+        if self.pool.coin_creator == Pubkey::default() {
+            FALLBACK_FEES.without_creator()
+        } else {
+            FALLBACK_FEES
+        }
+    }
+
+    /// Screening fee: resolved at load time when the configs were reachable
+    /// (only the total matters for pricing).
+    fn offline_fees(&self) -> Fees {
+        match self.pool.screening_fee_bps {
+            Some(total) => Fees { lp_bps: total, protocol_bps: 0, creator_bps: 0 },
+            None => self.fallback_fees(),
+        }
+    }
+
+    /// Exact quote over a reserve pair — shared by the offline (screening) and
+    /// live paths, so both speak the same math.
+    fn quote_exact(
         &self,
         amount_in: u64,
         direction: SwapDirection,
+        base_reserve: u64,
+        effective_quote_reserve: u128,
+        fees: Fees,
     ) -> Result<u64, GenericError> {
-        let bonding_curve = self
-            .pool
-            .bonding_curve
-            .as_ref()
-            .ok_or("Bonding curve data not available")?;
-
-        // Pumpfun uses 1% fee (100 bps)
-        let fee_bps = 100u64;
-        let fee_multiplier = 10000 - fee_bps;
-        let amount_in_with_fee = (amount_in as u128 * fee_multiplier as u128) / 10000;
-
-        let virtual_sol = bonding_curve.virtual_sol_reserves as u128;
-        let virtual_token = bonding_curve.virtual_token_reserves as u128;
-
-        if virtual_sol == 0 || virtual_token == 0 {
-            return Err("Bonding curve has zero virtual reserves".into());
+        if base_reserve == 0 || effective_quote_reserve == 0 {
+            return Err("Pool has zero liquidity".into());
         }
-
-        let output = match direction {
+        let out = match direction {
             SwapDirection::Buy => {
-                // SOL -> Token: constant product k = virtual_sol * virtual_token
-                let k = virtual_sol * virtual_token;
-                let new_sol = virtual_sol + amount_in_with_fee;
-                let new_token = k / new_sol;
-                virtual_token.saturating_sub(new_token) as u64
+                buy_exact_quote_in(amount_in, fees, base_reserve, effective_quote_reserve)
             }
             SwapDirection::Sell => {
-                // Token -> SOL: constant product
-                let k = virtual_sol * virtual_token;
-                let new_token = virtual_token + amount_in_with_fee;
-                let new_sol = k / new_token;
-                virtual_sol.saturating_sub(new_sol) as u64
+                sell_base_in(amount_in, fees, base_reserve, effective_quote_reserve)
             }
         };
-
-        Ok(output)
+        Ok(out)
     }
 }
 
@@ -128,7 +207,7 @@ impl Market for PumpfunAmmMarket {
             quote_vault: self.pool.pool_quote_token_account,
             base_vault: self.pool.pool_base_token_account,
             fees: PoolFees {
-                trade_fee_bps: 100,
+                trade_fee_bps: self.offline_fees().total_bps(),
                 protocol_fee_bps: None,
             },
         })
@@ -154,50 +233,79 @@ impl Market for PumpfunAmmMarket {
         amount_in: u64,
         direction: SwapDirection,
     ) -> Result<u64, GenericError> {
-        self.calculate_bonding_curve_output(amount_in, direction)
+        // The synthesized curve already carries `virtual_quote_reserves` in
+        // `virtual_sol_reserves` (see the loader's `build_pumpfun`), so the
+        // offline quote matches the live pricing model (fees aside).
+        let bonding_curve = self
+            .pool
+            .bonding_curve
+            .as_ref()
+            .ok_or("Bonding curve data not available")?;
+        self.quote_exact(
+            amount_in,
+            direction,
+            bonding_curve.virtual_token_reserves,
+            bonding_curve.virtual_sol_reserves as u128,
+            self.offline_fees(),
+        )
     }
 
     fn calculate_output_live(
         &self,
         amount_in: u64,
         direction: SwapDirection,
-        _pool_data: Option<&[u8]>,
-        _quote_vault_balance: u64,
-        _base_vault_balance: u64,
+        pool_data: Option<&[u8]>,
+        quote_vault_balance: u64,
+        base_vault_balance: u64,
     ) -> Result<u64, GenericError> {
-        // Pumpfun swap data lives in the bonding curve account, not the pool account.
-        // Live bonding curve updates would require a separate account mapping.
-        self.calculate_bonding_curve_output(amount_in, direction)
+        if quote_vault_balance == 0 || base_vault_balance == 0 {
+            // Sem dado fresco: cai no snapshot do load.
+            return self.calculate_output(amount_in, direction);
+        }
+        let effective_quote =
+            self.effective_quote_reserve(pool_data, quote_vault_balance);
+        self.quote_exact(
+            amount_in,
+            direction,
+            base_vault_balance,
+            effective_quote,
+            self.offline_fees(),
+        )
     }
 
-    /// Preço live do PumpSwap AMM: CPMM sobre os **vaults** (frescos do store).
+    /// Preço live do PumpSwap AMM: CPMM exato sobre os **vaults** + o
+    /// `virtual_quote_reserves` anexado ao pool account, com a fee por faixa do
+    /// `FeeConfig` (lp 20 + protocol 5 + creator 5..95 bps).
     ///
-    /// O pool account do pump_amm NÃO tem reservas — elas vivem nos dois vaults.
-    /// O `bonding_curve` embutido no cache (sintetizado no load) serve só para
-    /// screening (`financials`/`calculate_output`); a verificação exata chama
-    /// este método com os saldos ao vivo do AccountStore.
+    /// O pool account do pump_amm NÃO tem reservas — elas vivem nos dois vaults,
+    /// mas o preço é `vault_quote + virtual_quote_reserves`. O `bonding_curve`
+    /// embutido no cache (sintetizado no load) serve só para screening
+    /// (`financials`/`calculate_output`); a verificação exata chama este método
+    /// com os saldos ao vivo do AccountStore e as contas de fee.
     fn calculate_output_live_ex(
         &self,
         amount_in: u64,
         direction: SwapDirection,
-        _pool_data: Option<&[u8]>,
+        pool_data: Option<&[u8]>,
         quote_vault_balance: u64,
         base_vault_balance: u64,
-        _provider: &dyn solroute_core::AccountDataProvider,
+        provider: &dyn solroute_core::AccountDataProvider,
     ) -> Result<u64, GenericError> {
         if quote_vault_balance == 0 || base_vault_balance == 0 {
             // Sem dado fresco: cai no snapshot do load.
-            return self.calculate_bonding_curve_output(amount_in, direction);
+            return self.calculate_output(amount_in, direction);
         }
-        const FEE_BPS: u64 = 100;
-        match direction {
-            SwapDirection::Buy => {
-                constant_product_swap(quote_vault_balance, base_vault_balance, amount_in, FEE_BPS)
-            }
-            SwapDirection::Sell => {
-                constant_product_swap(base_vault_balance, quote_vault_balance, amount_in, FEE_BPS)
-            }
-        }
+        let effective_quote =
+            self.effective_quote_reserve(pool_data, quote_vault_balance);
+        let creator_fee_bps = self.creator_fee_bps(pool_data);
+        let fees = self.resolve_fees(provider, base_vault_balance, effective_quote, creator_fee_bps);
+        self.quote_exact(
+            amount_in,
+            direction,
+            base_vault_balance,
+            effective_quote,
+            fees,
+        )
     }
 
     fn calculate_price_impact(

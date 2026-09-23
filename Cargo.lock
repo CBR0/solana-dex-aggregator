@@ -4770,6 +4770,7 @@ dependencies = [
  "bincode",
  "dashmap",
  "futures",
+ "pumpfun-amm",
  "rustls",
  "serde",
  "serde_json",

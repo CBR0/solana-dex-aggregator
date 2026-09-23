@@ -53,9 +53,11 @@ const ACCOUNT_SUBS: &[(&str, &str, Shape)] = &[
 /// Top-N pools (by cached vault balance) whose vault token accounts get
 /// explicit account-list subscriptions. Venues que precisam de saldo de vault
 /// fresco no quote: Raydium V4 e DAMM V1 (preço pelos vaults) e **Pumpfun AMM**
-/// (o pool account não guarda reservas — o preço É a razão dos vaults). DLMM
-/// também entra: o preço vem do bin ativo, mas o cap de reserva da quote lê os
-/// vaults. Orca/CLMM trazem preço no pool account (sqrt/tick) e não precisam.
+/// (o pool account não guarda reservas — o preço é `vault_quote +
+/// virtual_quote_reserves`, com o virtual no pool account, mantido fresco pelo
+/// poll do engine). DLMM também entra: o preço vem do bin ativo, mas o cap de
+/// reserva da quote lê os vaults. Orca/CLMM trazem preço no pool account
+/// (sqrt/tick) e não precisam.
 const VAULT_LIST_POOLS: usize = 15_000;
 /// Keys per named account-list filter (bounds per-filter request size).
 const VAULT_LIST_CHUNK: usize = 5_000;
