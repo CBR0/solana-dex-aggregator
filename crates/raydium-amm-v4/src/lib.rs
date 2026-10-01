@@ -216,17 +216,28 @@ impl Market for RaydiumAmmV4Market {
         } else {
             (self.quote_balance, self.base_balance)
         };
-
+        // O `current_price` é humano (quote/base ajustados por decimais); o
+        // preço pós-swap precisa da mesma normalização, senão o impacto sai
+        // inflado por 10^(qd−bd) (1000x p/ SOL 9 vs token 6):
+        //   impact_bps = |post_h − pre_h| / pre_h × 10⁴,
+        //   post_h = (new_quote/10^qd) / (new_base/10^bd).
+        let (quote_dec, base_dec) = if self.flipped {
+            (self.pool.base_decimal, self.pool.quote_decimal)
+        } else {
+            (self.pool.quote_decimal, self.pool.base_decimal)
+        };
         let post_swap_price = match direction {
             SwapDirection::Buy => {
                 let new_quote = quote_bal + amount_in;
                 let new_base = base_bal - output;
-                new_quote as f64 / new_base as f64
+                (new_quote as f64 / 10f64.powi(quote_dec as i32))
+                    / (new_base as f64 / 10f64.powi(base_dec as i32))
             }
             SwapDirection::Sell => {
                 let new_base = base_bal + amount_in;
                 let new_quote = quote_bal - output;
-                new_quote as f64 / new_base as f64
+                (new_quote as f64 / 10f64.powi(quote_dec as i32))
+                    / (new_base as f64 / 10f64.powi(base_dec as i32))
             }
         };
 
@@ -254,5 +265,99 @@ impl Market for RaydiumAmmV4Market {
 
     fn is_active(&self) -> bool {
         self.pool.status == 6
+    }
+}
+
+#[cfg(test)]
+mod impact_tests {
+    use super::*;
+
+    /// Pool SOL(9)/TOKEN(6) não-flipped, 10 SOL x 1000 tokens, fee 25bps.
+    fn fixture() -> RaydiumAmmV4Market {
+        let pool = RaydiumAMMV4 {
+            status: 6,
+            nonce: 0,
+            max_order: 0,
+            depth: 0,
+            base_decimal: 6,
+            quote_decimal: 9,
+            state: 0,
+            reset_flag: 0,
+            min_size: 0,
+            vol_max_cut_ratio: 0,
+            amount_wave: 0,
+            base_lot_size: 0,
+            quote_lot_size: 0,
+            min_price_multiplier: 0,
+            max_price_multiplier: 0,
+            system_decimal_value: 0,
+            min_separate_numerator: 0,
+            min_separate_denominator: 0,
+            trade_fee_numerator: 25,
+            trade_fee_denominator: 10000,
+            pnl_numerator: 0,
+            pnl_denominator: 0,
+            swap_fee_numerator: 0,
+            swap_fee_denominator: 0,
+            base_need_take_pnl: 0,
+            quote_need_take_pnl: 0,
+            quote_total_pnl: 0,
+            base_total_pnl: 0,
+            pool_open_time: 0,
+            punish_pc_amount: 0,
+            punish_coin_amount: 0,
+            orderbook_to_init_time: 0,
+            swap_base_in_amount: 0,
+            swap_quote_out_amount: 0,
+            swap_base_2_quote_fee: 0,
+            swap_quote_in_amount: 0,
+            swap_base_out_amount: 0,
+            swap_quote_2_base_fee: 0,
+            base_vault: Pubkey::new_from_array([11u8; 32]),
+            quote_vault: Pubkey::new_from_array([12u8; 32]),
+            base_mint: Pubkey::new_from_array([21u8; 32]),
+            quote_mint: Pubkey::new_from_array([22u8; 32]),
+            lp_mint: Pubkey::new_from_array([13u8; 32]),
+            open_orders: Pubkey::new_from_array([14u8; 32]),
+            market_id: Pubkey::new_from_array([15u8; 32]),
+            market_program_id: Pubkey::new_from_array([16u8; 32]),
+            target_oders: Pubkey::new_from_array([17u8; 32]),
+            withdraw_queue: Pubkey::new_from_array([18u8; 32]),
+            lp_vault: Pubkey::new_from_array([19u8; 32]),
+            owner: Pubkey::new_from_array([20u8; 32]),
+            lp_reserve: 0,
+            padding: [0u64; 3],
+        };
+        RaydiumAmmV4Market::new(
+            pool,
+            "test".into(),
+            10_000_000_000,   // 10 SOL quote
+            1_000_000_000,    // 1000 tokens base
+        )
+    }
+
+    #[test]
+    fn buy_impact_is_plausible_not_1000x() {
+        let m = fixture();
+        assert!(!m.flipped);
+        // Compra 0.1 SOL (~1% da reserva): impacto real ≈ 1% ≈ 100bps.
+        let impact = m.calculate_price_impact(100_000_000, SwapDirection::Buy).unwrap();
+        assert!(
+            impact < 10_000,
+            "impacto implausível (bug 1000x?): {impact}bps"
+        );
+        assert!(impact > 0, "troca de 1% da reserva deveria mover o preço");
+    }
+
+    #[test]
+    fn sell_impact_is_plausible_not_1000x() {
+        let m = fixture();
+        // Vende 10 tokens (~1% da reserva).
+        let impact = m.calculate_price_impact(10_000_000, SwapDirection::Sell).unwrap();
+        assert!(
+            impact < 10_000,
+            "impacto implausível (bug 1000x?): {impact}bps"
+        );
+        assert!(impact > 0, "troca de 1% da reserva deveria mover o preço");
     }
 }

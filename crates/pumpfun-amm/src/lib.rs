@@ -329,7 +329,10 @@ impl Market for PumpfunAmmMarket {
                 if new_token == 0 {
                     return Err("Insufficient liquidity in bonding curve".into());
                 }
-                new_sol as f64 / new_token as f64
+                // Humano (mesma normalização do `current_price`): senão o
+                // impacto sai inflado por 10^(9−base_dec) (1000x p/ token 6).
+                (new_sol as f64 / new_token as f64)
+                    * 10f64.powi(self.base_decimals as i32 - 9)
             }
             SwapDirection::Sell => {
                 let new_token = bonding_curve.virtual_token_reserves + amount_in;
@@ -337,7 +340,8 @@ impl Market for PumpfunAmmMarket {
                 if new_token == 0 {
                     return Err("Insufficient liquidity in bonding curve".into());
                 }
-                new_sol as f64 / new_token as f64
+                (new_sol as f64 / new_token as f64)
+                    * 10f64.powi(self.base_decimals as i32 - 9)
             }
         };
 
@@ -754,5 +758,68 @@ mod bc_tests {
         let mut live = curve_bytes(1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000, 0, creator);
         live[48] = 1; // complete = true
         assert!(m.calculate_output_live(100_000_000, SwapDirection::Buy, Some(&live), 0, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod amm_impact_tests {
+    use super::*;
+    use solroute_core::{Market, SwapDirection};
+
+    /// PumpSwap SOL(9)/TOKEN(6): 100 SOL x 1M tokens virtuais, fee 30bps.
+    fn fixture() -> PumpfunAmmMarket {
+        let z = Pubkey::new_from_array([0u8; 32]);
+        PumpfunAmmMarket {
+            pool: PumpfunAmmPool {
+                pool_bump: 0,
+                index: 0,
+                creator: z,
+                base_mint: Pubkey::new_from_array([31u8; 32]),
+                quote_mint: Pubkey::new_from_array([32u8; 32]),
+                lp_mint: z,
+                pool_base_token_account: z,
+                pool_quote_token_account: z,
+                lp_supply: 0,
+                coin_creator: z,
+                is_mayhem_mode: false,
+                is_cashback_coin: false,
+                virtual_quote_reserves: 0,
+                creator_fee_bps: 0,
+                screening_fee_bps: Some(30),
+                bonding_curve: Some(PumpfunBondingCurve {
+                    virtual_token_reserves: 1_000_000_000_000,
+                    virtual_sol_reserves: 100_000_000_000,
+                    real_token_reserves: 900_000_000_000,
+                    real_sol_reserves: 90_000_000_000,
+                    token_total_supply: 1_000_000_000_000,
+                    complete: false,
+                    creator: z,
+                }),
+            },
+            pool_address: "test".into(),
+            base_decimals: 6,
+        }
+    }
+
+    #[test]
+    fn buy_impact_is_plausible_not_1000x() {
+        let m = fixture();
+        // Compra 0.1 SOL (~0.1% da reserva): impacto real ≈ 0.1% ≈ 10bps.
+        let impact = m.calculate_price_impact(100_000_000, SwapDirection::Buy).unwrap();
+        assert!(
+            impact < 10_000,
+            "impacto implausível (bug 1000x?): {impact}bps"
+        );
+    }
+
+    #[test]
+    fn sell_impact_is_plausible_not_1000x() {
+        let m = fixture();
+        // Vende 1000 tokens (~0.1% da reserva).
+        let impact = m.calculate_price_impact(1_000_000_000, SwapDirection::Sell).unwrap();
+        assert!(
+            impact < 10_000,
+            "impacto implausível (bug 1000x?): {impact}bps"
+        );
     }
 }
