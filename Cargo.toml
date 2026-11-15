@@ -66,26 +66,21 @@ serde_json = "1.0"
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 
-solana-sdk = "4"
+solana-sdk = "~4.1"
 # serde + borsh + curve25519 (PDA derivation) enabled explicitly on the
 # single pubkey 4.x copy used tree-wide.
 solana-pubkey = { version = "4", features = ["serde", "borsh", "curve25519"] }
-# Pinned below 4.5: message 4.5+ moved to wincode 0.6, which the
-# solana-transaction 4.1.x / rpc-client 4.1.x train cannot derive against.
-# 4.2+ already carries the v1 message format, so nothing is lost.
-solana-message = "~4.4"
-# Same wincode-0.5 train pinning (see above): transaction 4.1.x derives
-# against these crates' types, so they must stay on their 0.5-era minors.
-solana-transaction = "~4.1"
-solana-signature = "~3.4"
-solana-hash = "~4.4"
-solana-address = "~2.6"
-solana-keypair = "3"
+# Train 4.6 (Agave 4.6): message 4.5+ e transaction 4.2+ usam wincode 0.6.
+# A família precisa caminhar junta; message 4.2+ carrega o formato v1.
+solana-message = "~4.6"
+solana-transaction = "~4.3"
+solana-signature = "~3.5"
+solana-hash = "~4.6"
+solana-address = "~2.7"
+solana-keypair = "^3.1.2"
 solana-signer = "3"
-# Version pin only (wincode-0.5 train; pulled via transaction-status);
-# see solana-message pin above.
-solana-reward-info = "~6.2"
-solana-account = "4"
+solana-reward-info = "6"
+solana-account = "~4.6"
 solana-system-interface = { version = "3", features = ["bincode"] }
 
 
